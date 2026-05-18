@@ -11,6 +11,7 @@ import (
 	gocoro "github.com/resonatehq/gocoro"
 
 	"github.com/thrawn01/election/internal/engine"
+	"github.com/thrawn01/election/internal/prod"
 )
 
 // compile-time interface conformance check
@@ -60,8 +61,13 @@ type node struct {
 	currentLeader    string
 	rng              *rand.Rand
 
-	// Lifecycle
-	started atomic.Bool
+	// Lifecycle — set by Start, used by Stop and public methods
+	started    atomic.Bool
+	eventCh    chan engine.Event
+	completeCh chan prod.Completion
+	doneCh     chan struct{}
+	sched      gocoro.Scheduler[engine.Req, engine.Resp]
+	io         *prod.ProdIO
 }
 
 // NewNode creates a new election node. Call Start() to participate in the election.
@@ -96,6 +102,11 @@ func NewNode(conf Config) (Node, error) {
 		log:          conf.Log,
 		currentPeers: conf.Peers,
 		rng:          rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		// Pre-allocate the event channel so it is safe to read in ReceiveRPC,
+		// SetPeers, and Resign even before Start is called.
+		eventCh:    make(chan engine.Event, 1000),
+		completeCh: make(chan prod.Completion, 1000),
+		doneCh:     make(chan struct{}),
 	}
 	n.peers.Store(conf.Peers)
 	n.leader.Store("")
@@ -138,27 +149,177 @@ func (n *node) Stats() Stats {
 }
 
 // -------------------------------------------------------------------------
-// Stub lifecycle methods — wired in Phase 4
+// Node lifecycle methods
 // -------------------------------------------------------------------------
 
+// Start creates the production IO adapter and gocoro scheduler, adds the main
+// run coroutine, and launches the main loop in a background goroutine. It is
+// non-blocking; the context governs startup only and is not retained.
+// Double-start is prevented by an atomic flag.
 func (n *node) Start(_ context.Context) error {
+	if !n.started.CompareAndSwap(false, true) {
+		return errors.New("node already started")
+	}
+
+	// The event and completion channels are pre-allocated in NewNode so they
+	// are always safe to access. The doneCh is pre-allocated too.
+	n.io = prod.NewProdIO(prod.Config{
+		SendRPC:        prod.SendRPCFunc(n.conf.SendRPC),
+		NetworkTimeout: n.conf.NetworkTimeout,
+		Log:            n.conf.Log,
+	}, n.eventCh, n.completeCh)
+	n.sched = gocoro.New(n.io, 100)
+
+	_, ok := gocoro.Add(n.sched, n.run)
+	if !ok {
+		return errors.New("failed to add coroutine to scheduler")
+	}
+
+	go prod.Run(n.sched, n.completeCh, n.doneCh)
 	return nil
 }
 
-func (n *node) Stop(_ context.Context) error {
-	return nil
+// Stop pushes an EventShutdown into the event channel and waits for the main
+// loop goroutine to exit. If the context expires before a clean shutdown,
+// it calls sched.Shutdown(), closes eventCh, and returns ctx.Err().
+// Calling Stop on a node that was never started returns nil immediately.
+func (n *node) Stop(ctx context.Context) error {
+	if !n.started.Load() {
+		return nil
+	}
+
+	// Signal the coroutine to shut down
+	n.io.SetStopped()
+	select {
+	case n.eventCh <- engine.Event{Kind: engine.EventShutdown}:
+	default:
+		// If eventCh is full, non-blocking push failed — try with context
+		select {
+		case n.eventCh <- engine.Event{Kind: engine.EventShutdown}:
+		case <-ctx.Done():
+			n.forceShutdown()
+			return ctx.Err()
+		}
+	}
+
+	// Wait for clean shutdown
+	select {
+	case <-n.doneCh:
+		return nil
+	case <-ctx.Done():
+		n.forceShutdown()
+		return ctx.Err()
+	}
 }
 
-func (n *node) SetPeers(_ context.Context, _ []string) error {
-	return nil
+// forceShutdown forcefully shuts down the scheduler and closes eventCh to
+// unblock any goroutine waiting on it.
+func (n *node) forceShutdown() {
+	n.sched.Shutdown()
+	close(n.eventCh)
 }
 
-func (n *node) Resign(_ context.Context) error {
-	return ErrNotLeader
+// ReceiveRPC pushes an EventRPC into the event channel and waits for the
+// coroutine to process it and invoke the Respond callback. Only peer-to-peer
+// RPCs are accepted (HeartBeatRPC, VoteRPC, ResetElectionRPC). Any other RPC
+// type returns an error response without entering the event channel.
+func (n *node) ReceiveRPC(ctx context.Context, req RPCRequest) (RPCResponse, error) {
+	if !n.started.Load() {
+		return RPCResponse{Error: "node not started"}, nil
+	}
+
+	switch req.RPC {
+	case HeartBeatRPC, VoteRPC, ResetElectionRPC:
+		// Accepted peer-to-peer RPCs
+	default:
+		return RPCResponse{Error: "unknown RPC"}, nil
+	}
+
+	respCh := make(chan RPCResponse, 1)
+	event := engine.Event{
+		Kind:   engine.EventRPC,
+		RPCReq: req,
+		Respond: func(resp RPCResponse) {
+			respCh <- resp
+		},
+	}
+
+	select {
+	case n.eventCh <- event:
+	case <-ctx.Done():
+		return RPCResponse{}, ctx.Err()
+	}
+
+	select {
+	case resp := <-respCh:
+		return resp, nil
+	case <-ctx.Done():
+		return RPCResponse{}, ctx.Err()
+	}
 }
 
-func (n *node) ReceiveRPC(_ context.Context, _ RPCRequest) (RPCResponse, error) {
-	return RPCResponse{Error: "not started"}, nil
+// SetPeers updates the list of peers. If the node has not been started yet,
+// the update is applied directly (the coroutine is not running). After start,
+// the update is pushed through the event channel so the coroutine processes it
+// safely.
+func (n *node) SetPeers(ctx context.Context, peers []string) error {
+	if !n.started.Load() {
+		// Node not started — update directly (no coroutine running yet)
+		n.currentPeers = peers
+		n.peers.Store(peers)
+		return nil
+	}
+
+	doneCh := make(chan error, 1)
+	event := engine.Event{
+		Kind:  engine.EventSetPeers,
+		Peers: peers,
+		Done: func(err error) {
+			doneCh <- err
+		},
+	}
+
+	select {
+	case n.eventCh <- event:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Resign pushes an EventResign into the event channel and waits for the
+// coroutine to process it. Returns ErrNotLeader if the node is not the leader.
+func (n *node) Resign(ctx context.Context) error {
+	if !n.started.Load() {
+		return ErrNotLeader
+	}
+
+	doneCh := make(chan error, 1)
+	event := engine.Event{
+		Kind: engine.EventResign,
+		Done: func(err error) {
+			doneCh <- err
+		},
+	}
+
+	select {
+	case n.eventCh <- event:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // -------------------------------------------------------------------------
