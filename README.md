@@ -139,8 +139,3 @@ Fault injection capabilities:
 - **RPC drops** - Global or per-node drop rates
 - **RPC delays** - Per-link artificial latency
 - **Deterministic replay** - Same seed produces identical execution
-
-## Mailgun History
-This library is a modified version of the election library used successfully during my time at
-[Mailgun](https://github.com/mailgun). The original package can be found
-[here](https://github.com/mailgun/holster).
