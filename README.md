@@ -37,7 +37,7 @@ func main() {
         UniqueID: "node-1",
         Peers:    []string{"node-1", "node-2", "node-3"},
         SendRPC:  sendRPC,  // your network transport
-        OnLeaderChange: func(leader string) {
+        OnLeaderChange: func(leader string, term uint64) {
             slog.Info("leader changed", "leader", leader)
         },
     })

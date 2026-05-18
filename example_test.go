@@ -78,7 +78,7 @@ func SimpleExample(t *testing.T) {
 	node1, err := election.NewNode(election.Config{
 		Peers:    []string{"localhost:7080", "localhost:7081"},
 		UniqueID: "localhost:7080",
-		OnLeaderChange: func(leader string) {
+		OnLeaderChange: func(leader string, term uint64) {
 			log.Printf("Current Leader: %s\n", leader)
 		},
 		SendRPC: sendRPC,

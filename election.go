@@ -970,7 +970,7 @@ func (n *node) setLeader(leader string) {
 			n.isLeader.Store(false)
 		}
 		if n.conf.OnLeaderChange != nil {
-			n.conf.OnLeaderChange(leader)
+			n.conf.OnLeaderChange(leader, n.currentTerm)
 		}
 	}
 }
