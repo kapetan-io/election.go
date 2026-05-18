@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gocoro "github.com/resonatehq/gocoro"
+	gocoroio "github.com/resonatehq/gocoro/pkg/io"
 
 	"github.com/thrawn01/election/internal/engine"
 	"github.com/thrawn01/election/internal/prod"
@@ -966,5 +967,75 @@ func (n *node) quorumSize() int {
 
 func (n *node) randomDuration(minDur time.Duration) time.Duration {
 	return minDur + time.Duration(n.rng.Int63())%minDur //nolint:gosec
+}
+
+// -------------------------------------------------------------------------
+// Simulation helpers (internal use only — not part of the public Node API)
+// -------------------------------------------------------------------------
+
+// NewNodeForSim creates a node with a caller-provided *rand.Rand instead of
+// seeding from wall-clock time. Used by internal/sim to inject a deterministic
+// RNG seeded from the simulation master seed.
+func NewNodeForSim(conf Config, rng *rand.Rand) (Node, error) {
+	if conf.UniqueID == "" {
+		return nil, errors.New("refusing to spawn a new node with no Config.UniqueID defined")
+	}
+	if conf.SendRPC == nil {
+		return nil, errors.New("refusing to spawn a new node with no Config.SendRPC defined")
+	}
+
+	if conf.LeaderQuorumTimeout == 0 {
+		conf.LeaderQuorumTimeout = time.Second * 12
+	}
+	if conf.HeartBeatTimeout == 0 {
+		conf.HeartBeatTimeout = time.Second * 6
+	}
+	if conf.ElectionTimeout == 0 {
+		conf.ElectionTimeout = time.Second * 6
+	}
+	if conf.NetworkTimeout == 0 {
+		conf.NetworkTimeout = time.Second * 3
+	}
+	if conf.Log == nil {
+		conf.Log = slog.Default().With("node", conf.UniqueID)
+	}
+
+	n := &node{
+		conf:         conf,
+		self:         conf.UniqueID,
+		log:          conf.Log,
+		currentPeers: conf.Peers,
+		rng:          rng,
+		eventCh:      make(chan engine.Event, 1000),
+		completeCh:   make(chan prod.Completion, 1000),
+		doneCh:       make(chan struct{}),
+	}
+	n.peers.Store(conf.Peers)
+	n.leader.Store("")
+	return n, nil
+}
+
+// StartNodeForSim wires a node to a caller-provided scheduler and IO adapter
+// instead of creating the production ones. Used by internal/sim to inject
+// simulation IO. This is not part of the public Node interface.
+func StartNodeForSim(nd Node, sched gocoro.Scheduler[engine.Req, engine.Resp], io gocoroio.IO[engine.Req, engine.Resp]) error {
+	n, ok := nd.(*node)
+	if !ok {
+		return errors.New("StartNodeForSim: node must be a *node")
+	}
+	if !n.started.CompareAndSwap(false, true) {
+		return errors.New("node already started")
+	}
+
+	n.sched = sched
+	_, ok = gocoro.Add(n.sched, n.run)
+	if !ok {
+		return errors.New("failed to add coroutine to scheduler")
+	}
+
+	// The IO adapter is not stored on the node because the simulation drives
+	// the scheduler directly — there is no prod.Run goroutine to invoke.
+	_ = io
+	return nil
 }
 
