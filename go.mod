@@ -3,9 +3,9 @@ module github.com/thrawn01/election
 go 1.21.7
 
 require (
-	github.com/golang/protobuf v1.5.4
 	github.com/google/uuid v1.6.0
 	github.com/mailgun/holster/v4 v4.19.0
+	github.com/resonatehq/gocoro v0.0.0-20240928015848-78539a59dab0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.9.0
 )
