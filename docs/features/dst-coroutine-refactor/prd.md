@@ -36,6 +36,7 @@ The deterministic simulation harness is an internal development tool for testing
 - `ReceiveRPC(ctx context.Context, req RPCRequest) (RPCResponse, error)` — context-aware, explicit error return, no pointer out-param
 - Callback-based `OnLeaderChange` — synchronous callback invoked from the coroutine event loop (must not block or re-enter the node), no channel subscription (avoids forcing goroutines on consumers who may also use DST). `Config.OnUpdate func(string)` is removed; `OnLeaderChange` is its replacement and is set on `Config` in the same way.
 - `IsLeader()` / `GetLeader()` / `GetState() NodeState` via atomic reads — truly non-blocking, remove channel hop. `GetState` returns the full node state (leader, isLeader, term, peers, current role) for callers that do not want to track callback state. The old blocking signature `GetState(ctx context.Context) (NodeState, error)` is removed.
+- `Stats() Stats` — atomic counters (heartbeats sent/received, elections started/won) readable without entering the coroutine. Primary purpose is test assertions in deterministic simulation; also useful for production debugging. Not a full metrics/observability system.
 - `SetPeers(ctx context.Context, peers []string) error` / `Resign(ctx context.Context) error` — routed through the coroutine scheduler. Both accept a context so callers can set a deadline; a cancelled or timed-out context returns an error. There are no silent drops.
 - Context propagation into `electSelf` / `sendHeartBeat` (currently `context.Background()`)
 - Node lifecycle: `Start(ctx context.Context) error` is non-blocking — it launches the coroutine scheduler in a background goroutine and returns; the context governs only the startup phase and is not retained after `Start` returns. `Stop(ctx context.Context) error` is the sole stop mechanism — it stops the scheduler gracefully, waiting for in-flight RPCs to drain or the context to expire. The old `shutdownCh` / `running` atomic / `syncutil.WaitGroup` are removed.
@@ -67,7 +68,7 @@ The deterministic simulation harness is an internal development tool for testing
 
 ### Out of Scope / Non-Goals
 
-- **Metrics/observability** (elections started, won, heartbeats sent/missed, step-downs, dropped RPCs) — valuable but additive, can layer on after refactor. Tracked in `docs/known-issues.md`.
+- **Full metrics/observability system** (prometheus export, per-peer latency histograms, step-down counters, dropped-RPC counters) — valuable but additive, can layer on after refactor. Tracked in `docs/known-issues.md`. Note: basic `Stats()` counters for test assertions are in scope (see Public API cleanup above).
 - **Fencing token / monotonic lease epoch** — safety enhancement for leadership, separate feature. Tracked in `docs/known-issues.md`.
 - **PreVote protocol** — not a gap. The library already prevents partitioned-node disruption via the leader-check guard in `handleVote`: followers with a known leader reject all vote requests from other candidates. See ADR for details.
 - **Storage interface for term/vote persistence** — not a gap. Nodes rejoin as fresh members via `SetPeers`, so there is no double-voting risk from restarts.
