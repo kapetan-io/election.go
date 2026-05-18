@@ -104,20 +104,6 @@ mux.HandleFunc("/rpc", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-## Config
-| Field | Default | Description |
-|---|---|---|
-| `UniqueID` | *required* | Identifier this node uses among peers |
-| `Peers` | `[]` | Initial peer list (including this node) |
-| `SendRPC` | *required* | Function to send an RPC to a peer |
-| `OnLeaderChange` | `nil` | Callback fired on leader transitions |
-| `HeartBeatTimeout` | `6s` | How long followers wait before starting a new election |
-| `ElectionTimeout` | `6s` | How long candidates wait for an election to complete |
-| `NetworkTimeout` | `3s` | Timeout for a single `SendRPC` call |
-| `LeaderQuorumTimeout` | `12s` | How long the leader waits for heartbeat responses before stepping down |
-| `MinimumQuorum` | `0` | Minimum peers required to elect a leader (0 = no minimum) |
-| `Log` | `slog.Default()` | `*slog.Logger` instance for this node |
-
 ## Node API
 - `NewNode(Config) (Node, error)` - Create a new election node
 - `Node.Start(ctx) error` - Begin participating in the election
