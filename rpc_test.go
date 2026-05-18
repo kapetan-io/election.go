@@ -26,11 +26,11 @@ func TestRPCRequest(t *testing.T) {
 			in: election.RPCRequest{
 				RPC: election.HeartBeatRPC,
 				Request: election.HeartBeatReq{
-					From: "node1",
-					Term: 1,
+					Leader: "node1",
+					Term:   1,
 				},
 			},
-			out: `{"rpc":"heartbeat","request":{"from":"node1","term":1}}`,
+			out: `{"rpc":"heartbeat","request":{"term":1,"leader":"node1"}}`,
 		},
 		{
 			name: "vote",
@@ -41,7 +41,7 @@ func TestRPCRequest(t *testing.T) {
 					Term:      1,
 				},
 			},
-			out: `{"rpc":"vote","request":{"candidate":"node1","term":1}}`,
+			out: `{"rpc":"vote","request":{"term":1,"candidate":"node1"}}`,
 		},
 		{
 			name: "reset",
@@ -49,7 +49,7 @@ func TestRPCRequest(t *testing.T) {
 				RPC:     election.ResetElectionRPC,
 				Request: election.ResetElectionReq{},
 			},
-			out: `{"rpc":"reset-election","request":{}}`,
+			out: `{"rpc":"reset_election","request":{}}`,
 		},
 		{
 			name: "resign",
@@ -65,15 +65,7 @@ func TestRPCRequest(t *testing.T) {
 				RPC:     election.SetPeersRPC,
 				Request: election.SetPeersReq{Peers: []string{"n0", "n1"}},
 			},
-			out: `{"rpc":"set-peers","request":{"peers":["n0","n1"]}}`,
-		},
-		{
-			name: "get-state",
-			in: election.RPCRequest{
-				RPC:     election.GetStateRPC,
-				Request: election.GetStateReq{},
-			},
-			out: `{"rpc":"get-state","request":{}}`,
+			out: `{"rpc":"set_peers","request":{"peers":["n0","n1"]}}`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,7 +79,6 @@ func TestRPCRequest(t *testing.T) {
 			assert.Equal(t, tt.in, in)
 		})
 	}
-
 }
 
 func TestRPCResponse(t *testing.T) {
@@ -101,23 +92,40 @@ func TestRPCResponse(t *testing.T) {
 			in: election.RPCResponse{
 				RPC: election.HeartBeatRPC,
 				Response: election.HeartBeatResp{
-					From: "node1",
 					Term: 1,
 				},
 			},
-			out: `{"rpc":"heartbeat","response":{"from":"node1","term":1}}`,
+			out: `{"rpc":"heartbeat","response":{"term":1}}`,
+		},
+		{
+			name: "heartbeat-zero-term",
+			in: election.RPCResponse{
+				RPC:      election.HeartBeatRPC,
+				Response: election.HeartBeatResp{},
+			},
+			out: `{"rpc":"heartbeat","response":{"term":0}}`,
 		},
 		{
 			name: "vote",
 			in: election.RPCResponse{
 				RPC: election.VoteRPC,
 				Response: election.VoteResp{
-					Candidate: "node1",
-					Term:      1,
-					Granted:   true,
+					Term:    1,
+					Granted: true,
 				},
 			},
-			out: `{"rpc":"vote","response":{"candidate":"node1","term":1,"granted":true}}`,
+			out: `{"rpc":"vote","response":{"term":1,"granted":true}}`,
+		},
+		{
+			name: "vote-not-granted",
+			in: election.RPCResponse{
+				RPC: election.VoteRPC,
+				Response: election.VoteResp{
+					Granted: false,
+					Term:    0,
+				},
+			},
+			out: `{"rpc":"vote","response":{"term":0,"granted":false}}`,
 		},
 		{
 			name: "reset",
@@ -125,7 +133,7 @@ func TestRPCResponse(t *testing.T) {
 				RPC:      election.ResetElectionRPC,
 				Response: election.ResetElectionResp{},
 			},
-			out: `{"rpc":"reset-election","response":{}}`,
+			out: `{"rpc":"reset_election","response":{}}`,
 		},
 		{
 			name: "resign",
@@ -143,19 +151,7 @@ func TestRPCResponse(t *testing.T) {
 				RPC:      election.SetPeersRPC,
 				Response: election.SetPeersResp{},
 			},
-			out: `{"rpc":"set-peers","response":{}}`,
-		},
-		{
-			name: "get-state",
-			in: election.RPCResponse{
-				RPC: election.GetStateRPC,
-				Response: election.GetStateResp{
-					Leader: "n0",
-					Peers:  []string{"n0", "n1"},
-					State:  "follower",
-				},
-			},
-			out: `{"rpc":"get-state","response":{"leader":"n0","state":"follower","peers":["n0","n1"]}}`,
+			out: `{"rpc":"set_peers","response":{}}`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -167,7 +163,6 @@ func TestRPCResponse(t *testing.T) {
 			err = json.Unmarshal(b, &in)
 			require.NoError(t, err)
 			assert.Equal(t, tt.in, in)
-
 		})
 	}
 }
@@ -180,14 +175,13 @@ func TestHTTPServer(t *testing.T) {
 		b, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		require.NoError(t, json.Unmarshal(b, &in))
-		var resp election.RPCResponse
 
+		var resp election.RPCResponse
 		switch in.RPC {
 		case election.HeartBeatRPC:
 			resp = election.RPCResponse{
 				RPC: election.HeartBeatRPC,
 				Response: election.HeartBeatResp{
-					From: "node1",
 					Term: 10,
 				},
 			}
@@ -207,8 +201,8 @@ func TestHTTPServer(t *testing.T) {
 	b, err := json.Marshal(election.RPCRequest{
 		RPC: election.HeartBeatRPC,
 		Request: election.HeartBeatReq{
-			Term: 10,
-			From: "node10",
+			Term:   10,
+			Leader: "node10",
 		},
 	})
 	require.NoError(t, err)
@@ -233,7 +227,6 @@ func TestHTTPServer(t *testing.T) {
 	// Should have the response we expect
 	hb := rpcResp.Response.(election.HeartBeatResp)
 	assert.Equal(t, uint64(10), hb.Term)
-	assert.Equal(t, "node1", hb.From)
 
 	// Send an unknown rpc request to the server
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, ts.URL, bytes.NewBuffer([]byte(`{"rpc":"unknown"}`)))

@@ -13,40 +13,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mailgun/holster/v4/errors"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"github.com/thrawn01/election"
 )
 
-func sendRPC(ctx context.Context, peer string, req election.RPCRequest, resp *election.RPCResponse) error {
-	// Marshall the RPC request to json
+func sendRPC(ctx context.Context, peer string, req election.RPCRequest) (election.RPCResponse, error) {
 	b, err := json.Marshal(req)
 	if err != nil {
-		return errors.Wrap(err, "while encoding request")
+		return election.RPCResponse{}, fmt.Errorf("while encoding request: %w", err)
 	}
 
-	// Create a new http request with context
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/rpc", peer), bytes.NewBuffer(b))
 	if err != nil {
-		return errors.Wrap(err, "while creating request")
+		return election.RPCResponse{}, fmt.Errorf("while creating request: %w", err)
 	}
 
-	// Send the request
 	hp, err := http.DefaultClient.Do(hr)
 	if err != nil {
-		return errors.Wrap(err, "while sending http request")
+		return election.RPCResponse{}, fmt.Errorf("while sending http request: %w", err)
 	}
 	defer func() {
 		_ = hp.Body.Close()
 	}()
 
-	// Decode the response from JSON
+	var resp election.RPCResponse
 	dec := json.NewDecoder(hp.Body)
 	if err := dec.Decode(&resp); err != nil {
-		return errors.Wrap(err, "while decoding response")
+		return election.RPCResponse{}, fmt.Errorf("while decoding response: %w", err)
 	}
-	return nil
+	return resp, nil
 }
 
 func newHandler(t *testing.T, node election.Node) func(w http.ResponseWriter, r *http.Request) {
@@ -57,9 +52,15 @@ func newHandler(t *testing.T, node election.Node) func(w http.ResponseWriter, r 
 			w.WriteHeader(http.StatusBadRequest)
 			_, err = w.Write([]byte(err.Error()))
 			require.NoError(t, err)
+			return
 		}
-		var resp election.RPCResponse
-		node.ReceiveRPC(req, &resp)
+		resp, err := node.ReceiveRPC(r.Context(), req)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, err = w.Write([]byte(err.Error()))
+			require.NoError(t, err)
+			return
+		}
 
 		enc := json.NewEncoder(w)
 		if err := enc.Encode(resp); err != nil {
@@ -70,22 +71,16 @@ func newHandler(t *testing.T, node election.Node) func(w http.ResponseWriter, r 
 	}
 }
 
-// This example spawns 2 nodes, in a real application you would
+// SimpleExample spawns 2 nodes. In a real application you would
 // only spawn a single node which would represent your application
 // in the election.
 func SimpleExample(t *testing.T) {
-	logrus.SetLevel(logrus.DebugLevel)
-
 	node1, err := election.NewNode(election.Config{
-		// A list of known peers at startup
-		Peers: []string{"localhost:7080", "localhost:7081"},
-		// A unique identifier used to identify us in a list of peers
+		Peers:    []string{"localhost:7080", "localhost:7081"},
 		UniqueID: "localhost:7080",
-		// Called whenever the library detects a change in leadership
-		OnUpdate: func(leader string) {
+		OnLeaderChange: func(leader string) {
 			log.Printf("Current Leader: %s\n", leader)
 		},
-		// Called when the library wants to contact other peers
 		SendRPC: sendRPC,
 	})
 	if err != nil {
@@ -126,15 +121,6 @@ func SimpleExample(t *testing.T) {
 		}
 		log.Fatal(server.ListenAndServe())
 	}()
-
-	// Wait for each of the http listeners to start fielding requests
-	if err := election.WaitForConnect("localhost:7080", 3, time.Second); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := election.WaitForConnect("localhost:7081", 3, time.Second); err != nil {
-		t.Fatal(err)
-	}
 
 	// Now that both http handlers are listening for requests we
 	// can safely start the election.

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/mailgun/holster/v4/setter"
 	"github.com/stretchr/testify/require"
 	"github.com/thrawn01/election"
 )
@@ -16,7 +15,7 @@ type ChangePair struct {
 	Leader string
 }
 
-// Useful in tests where you need to simulate an election cluster
+// TestCluster is useful in tests where you need to simulate an election cluster
 type TestCluster struct {
 	Nodes      map[string]*ClusterNode
 	OnChangeCh chan ChangePair
@@ -28,7 +27,7 @@ type TestCluster struct {
 type ClusterNode struct {
 	lock    sync.RWMutex
 	Node    election.Node
-	SendRPC func(from string, to string, req election.RPCRequest, resp *election.RPCResponse) error
+	SendRPC func(from string, to string, req election.RPCRequest) (election.RPCResponse, error)
 }
 
 func NewTestCluster(t *testing.T) *TestCluster {
@@ -40,20 +39,22 @@ func NewTestCluster(t *testing.T) *TestCluster {
 	}
 }
 
-// Spawns a new node and adds it to the cluster
+// SpawnNode spawns a new node and adds it to the cluster
 func (c *TestCluster) SpawnNode(name string, conf *election.Config) error {
-	setter.SetDefault(&conf, &election.Config{})
+	if conf == nil {
+		conf = &election.Config{}
+	}
 	n := &ClusterNode{
 		SendRPC: c.sendRPC,
 	}
 
 	conf.UniqueID = name
-	conf.SendRPC = func(ctx context.Context, peer string, req election.RPCRequest, resp *election.RPCResponse) error {
+	conf.SendRPC = func(ctx context.Context, peer string, req election.RPCRequest) (election.RPCResponse, error) {
 		n.lock.RLock()
 		defer n.lock.RUnlock()
-		return n.SendRPC(name, peer, req, resp)
+		return n.SendRPC(name, peer, req)
 	}
-	conf.OnUpdate = func(s string) {
+	conf.OnLeaderChange = func(s string) {
 		c.OnChangeCh <- ChangePair{
 			From:   name,
 			Leader: s,
@@ -93,19 +94,18 @@ func (c *TestCluster) Remove(name string) *ClusterNode {
 }
 
 func (c *TestCluster) updatePeers() {
-	// Build a list of all the peers
 	var peers []string
 	for k := range c.Nodes {
 		peers = append(peers, k)
 	}
 
-	// Update our list of known peers
 	for _, v := range c.Nodes {
 		err := v.Node.SetPeers(context.Background(), peers)
 		require.NoError(c.t, err)
 	}
 }
 
+// ClusterStatus maps node name to its reported leader
 type ClusterStatus map[string]string
 
 func (c *TestCluster) GetClusterStatus() ClusterStatus {
@@ -135,7 +135,7 @@ func (c *TestCluster) ClearErrors() {
 	c.errors = make(map[string]error)
 }
 
-// Add a specific peer to peer error
+// Disconnect adds a specific peer-to-peer network error
 func (c *TestCluster) Disconnect(from, to string, err error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -154,29 +154,27 @@ func (c *TestCluster) DelNetworkError(peer string) {
 	delete(c.errors, peer)
 }
 
-func (c *TestCluster) sendRPC(from, to string, req election.RPCRequest, resp *election.RPCResponse) error {
+func (c *TestCluster) sendRPC(from, to string, req election.RPCRequest) (election.RPCResponse, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
 	if err, ok := c.errors[from]; ok {
-		return err
+		return election.RPCResponse{}, err
 	}
 
 	if err, ok := c.errors[to]; ok {
-		return err
+		return election.RPCResponse{}, err
 	}
 
 	if err, ok := c.errors[c.peerKey(from, to)]; ok {
-		return err
+		return election.RPCResponse{}, err
 	}
 
 	n, ok := c.Nodes[to]
 	if !ok {
-		return fmt.Errorf("unknown peer '%s'", to)
+		return election.RPCResponse{}, fmt.Errorf("unknown peer '%s'", to)
 	}
-	n.Node.ReceiveRPC(req, resp)
-
-	return nil
+	return n.Node.ReceiveRPC(context.Background(), req)
 }
 
 func (c *TestCluster) Close() {

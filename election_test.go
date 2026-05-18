@@ -2,32 +2,20 @@ package election_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/mailgun/holster/v4/slice"
-	"github.com/mailgun/holster/v4/testutil"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thrawn01/election"
 )
 
-var (
-	cfg            *election.Config
-	ErrConnRefused = errors.New("connection refused")
-)
-
-func init() {
-	logrus.SetLevel(logrus.DebugLevel)
-	cfg = &election.Config{
-		NetworkTimeout:      time.Second,
-		HeartBeatTimeout:    time.Second,
-		LeaderQuorumTimeout: time.Second * 2,
-		ElectionTimeout:     time.Second * 2,
-	}
+var cfg = &election.Config{
+	NetworkTimeout:      time.Second,
+	HeartBeatTimeout:    time.Second,
+	LeaderQuorumTimeout: time.Second * 2,
+	ElectionTimeout:     time.Second * 2,
 }
 
 func createCluster(t *testing.T, c *TestCluster) {
@@ -36,12 +24,10 @@ func createCluster(t *testing.T, c *TestCluster) {
 	// Start with a known leader
 	err := c.SpawnNode("n0", cfg)
 	require.NoError(t, err)
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, ClusterStatus{
-			"n0": "n0",
-		}, status)
-	})
+		return status["n0"] == "n0"
+	}, 10*time.Second, 100*time.Millisecond)
 
 	// Added nodes should become followers
 	err = c.SpawnNode("n1", cfg)
@@ -53,28 +39,24 @@ func createCluster(t *testing.T, c *TestCluster) {
 	err = c.SpawnNode("n4", cfg)
 	require.NoError(t, err)
 
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, ClusterStatus{
-			"n0": "n0",
-			"n1": "n0",
-			"n2": "n0",
-			"n3": "n0",
-			"n4": "n0",
-		}, status)
-	})
+		return status["n0"] == "n0" &&
+			status["n1"] == "n0" &&
+			status["n2"] == "n0" &&
+			status["n3"] == "n0" &&
+			status["n4"] == "n0"
+	}, 10*time.Second, 100*time.Millisecond)
 }
 
 func TestSingleNodeLeader(t *testing.T) {
 	c := NewTestCluster(t)
 	err := c.SpawnNode("n0", cfg)
 	require.NoError(t, err)
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, ClusterStatus{
-			"n0": "n0",
-		}, status)
-	})
+		return status["n0"] == "n0"
+	}, 10*time.Second, 100*time.Millisecond)
 
 	// Consume first leader election event
 	event := <-c.OnChangeCh
@@ -101,17 +83,10 @@ func TestSimpleElection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait until n0 is no longer leader
-	testutil.UntilPass(t, 30, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		candidate := c.GetLeader()
-		if !assert.NotNil(t, candidate) {
-			return
-		}
-		assert.NotEqual(t, "n0", candidate.GetLeader())
-	})
-
-	for k, v := range c.Nodes {
-		t.Logf("Node: %s Leader: %t\n", k, v.Node.IsLeader())
-	}
+		return candidate != nil && candidate.GetLeader() != "n0"
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 func TestLeaderDisconnect(t *testing.T) {
@@ -119,21 +94,15 @@ func TestLeaderDisconnect(t *testing.T) {
 	createCluster(t, c)
 	defer c.Close()
 
-	c.AddNetworkError("n0", ErrConnRefused)
+	errConnRefused := errConnRefused()
+	c.AddNetworkError("n0", errConnRefused)
 	defer c.DelNetworkError("n0")
 
 	// Should lose leadership
-	testutil.UntilPass(t, 30, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		node := c.Nodes["n0"]
-		if !assert.NotNil(t, node.Node) {
-			return
-		}
-		assert.NotEqual(t, "n0", node.Node.GetLeader())
-	})
-
-	for k, v := range c.Nodes {
-		t.Logf("Node: %s Leader: %t\n", k, v.Node.IsLeader())
-	}
+		return node != nil && node.Node.GetLeader() != "n0"
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 func TestFollowerDisconnect(t *testing.T) {
@@ -141,22 +110,23 @@ func TestFollowerDisconnect(t *testing.T) {
 	createCluster(t, c)
 	defer c.Close()
 
-	c.AddNetworkError("n4", ErrConnRefused)
+	errConnRefused := errConnRefused()
+	c.AddNetworkError("n4", errConnRefused)
 	defer c.DelNetworkError("n4")
 
 	// Wait until n4 loses leader
-	testutil.UntilPass(t, 5, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.NotEqual(t, "n0", status["n4"])
-	})
+		return status["n4"] != "n0"
+	}, 5*time.Second, 100*time.Millisecond)
 
 	c.DelNetworkError("n4")
 
 	// Follower should resume being a follower without forcing a new election.
-	testutil.UntilPass(t, 60, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, "n0", status["n4"])
-	})
+		return status["n4"] == "n0"
+	}, 60*time.Second, 100*time.Millisecond)
 }
 
 func TestSplitBrain(t *testing.T) {
@@ -166,56 +136,34 @@ func TestSplitBrain(t *testing.T) {
 
 	c2 := NewTestCluster(t)
 
-	// Now take 2 nodes from cluster 1 and put them in their own cluster.
-	// This causes n0 to lose contact with n2-n4 and should update the member list
-	// such that n0 only knows about n1.
-
-	// Since n0 was leader previously, it should remain leader
 	c2.Add("n0", c1.Remove("n0"))
 	c2.Add("n1", c1.Remove("n1"))
 
 	// Cluster 1 should elect a new leader
-	testutil.UntilPass(t, 30, time.Second, func(t testutil.TestingT) {
-		assert.NotNil(t, c1.GetLeader())
-	})
-
-	for k, v := range c1.Nodes {
-		t.Logf("C1 Node: %s Leader: %t\n", k, v.Node.IsLeader())
-	}
+	require.Eventually(t, func() bool {
+		return c1.GetLeader() != nil
+	}, 30*time.Second, 100*time.Millisecond)
 
 	// Cluster 2 should elect a new leader
-	testutil.UntilPass(t, 30, time.Second, func(t testutil.TestingT) {
-		assert.NotNil(t, c2.GetLeader())
-	})
+	require.Eventually(t, func() bool {
+		return c2.GetLeader() != nil
+	}, 30*time.Second, 100*time.Millisecond)
 
-	for k, v := range c2.Nodes {
-		t.Logf("C2 Node: %s Leader: %t\n", k, v.Node.IsLeader())
-	}
-
-	// Move the nodes in cluster2, back to the cluster1
+	// Move the nodes in cluster2 back to cluster1
 	c1.Add("n0", c2.Remove("n0"))
 	c1.Add("n1", c2.Remove("n1"))
 
 	// The nodes should detect 2 leaders and start a new vote.
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c1.GetClusterStatus()
-		var leaders []string
+		leaders := make(map[string]struct{})
 		for _, v := range status {
-			if slice.ContainsString(v, leaders, nil) {
-				continue
+			if v != "" {
+				leaders[v] = struct{}{}
 			}
-			leaders = append(leaders, v)
 		}
-		if !assert.NotNil(t, leaders) {
-			return
-		}
-		assert.Equal(t, 1, len(leaders))
-		assert.NotEmpty(t, leaders[0])
-	})
-
-	for k, v := range c1.Nodes {
-		t.Logf("Node: %s Leader: %t\n", k, v.Node.IsLeader())
-	}
+		return len(leaders) == 1
+	}, 10*time.Second, 100*time.Millisecond)
 }
 
 func TestOmissionFaults(t *testing.T) {
@@ -223,38 +171,19 @@ func TestOmissionFaults(t *testing.T) {
 	createCluster(t, c1)
 	defer c1.Close()
 
-	// Create an unstable cluster with n3 and n4 only able to contact n1 and n2 respectively.
-	// The end result should be an omission fault of less than quorum.
-	//
-	// Diagram: lines indicate connectivity between nodes
-	// (n0)-----(n1)----(n4)
-	//   \       /
-	//	  \     /
-	//     \   /
-	//      (n2)----(n3)
-	//
+	errConnRefused := errConnRefused()
+	c1.Disconnect("n3", "n4", errConnRefused)
+	c1.Disconnect("n4", "n3", errConnRefused)
+	c1.Disconnect("n0", "n4", errConnRefused)
+	c1.Disconnect("n4", "n0", errConnRefused)
+	c1.Disconnect("n0", "n3", errConnRefused)
+	c1.Disconnect("n3", "n0", errConnRefused)
+	c1.Disconnect("n2", "n4", errConnRefused)
+	c1.Disconnect("n4", "n2", errConnRefused)
+	c1.Disconnect("n1", "n3", errConnRefused)
+	c1.Disconnect("n3", "n1", errConnRefused)
 
-	// n3 and n4 can't talk
-	c1.Disconnect("n3", "n4", ErrConnRefused)
-	c1.Disconnect("n4", "n3", ErrConnRefused)
-
-	// Leader can't talk to n4
-	c1.Disconnect("n0", "n4", ErrConnRefused)
-	c1.Disconnect("n4", "n0", ErrConnRefused)
-
-	// Leader can't talk to n3
-	c1.Disconnect("n0", "n3", ErrConnRefused)
-	c1.Disconnect("n3", "n0", ErrConnRefused)
-
-	// n2 and n4 can't talk
-	c1.Disconnect("n2", "n4", ErrConnRefused)
-	c1.Disconnect("n4", "n2", ErrConnRefused)
-
-	// n1 and n3 can't talk
-	c1.Disconnect("n1", "n3", ErrConnRefused)
-	c1.Disconnect("n3", "n1", ErrConnRefused)
-
-	// Cluster should retain n0 as leader in the face on unstable cluster
+	// Cluster should retain n0 as leader in the face of an unstable cluster
 	for i := 0; i < 12; i++ {
 		leader := c1.GetLeader()
 		require.NotNil(t, leader)
@@ -278,78 +207,43 @@ func TestIsolatedLeader(t *testing.T) {
 	createCluster(t, c1)
 	defer c1.Close()
 
-	// Create a cluster where the leader become isolated from the rest
-	// of the cluster.
-	//
-	// Diagram: lines indicate connectivity
-	// between nodes and n0 is leader
-	//
-	// (n0)----(n1)----(n4)
-	//          / \     /
-	//	       /   \   /
-	//        /     \ /
-	//      (n2)----(n3)
-	//
 	require.Equal(t, c1.GetLeader().GetLeader(), "n0")
 
-	// Leader can't talk to n2
-	c1.Disconnect("n0", "n2", ErrConnRefused)
-	c1.Disconnect("n2", "n0", ErrConnRefused)
-
-	// Leader can't talk to n3
-	c1.Disconnect("n0", "n3", ErrConnRefused)
-	c1.Disconnect("n3", "n0", ErrConnRefused)
-
-	// Leader can't talk to n4
-	c1.Disconnect("n0", "n4", ErrConnRefused)
-	c1.Disconnect("n4", "n0", ErrConnRefused)
+	errConnRefused := errConnRefused()
+	c1.Disconnect("n0", "n2", errConnRefused)
+	c1.Disconnect("n2", "n0", errConnRefused)
+	c1.Disconnect("n0", "n3", errConnRefused)
+	c1.Disconnect("n3", "n0", errConnRefused)
+	c1.Disconnect("n0", "n4", errConnRefused)
+	c1.Disconnect("n4", "n0", errConnRefused)
 
 	// Leader should realize it doesn't have a quorum of
-	// heartbeats and step down and remaining cluster should
-	// elect a new leader
-	for i := 0; i < 20; i++ {
+	// heartbeats and step down; remaining cluster should elect a new leader
+	require.Eventually(t, func() bool {
 		leader := c1.GetLeader()
 		if leader == nil {
-			goto sleep
+			return false
 		}
+		return leader.GetLeader() != "n0"
+	}, 20*time.Second, 500*time.Millisecond)
 
-		// Leader should no longer be n0
-		if leader.GetLeader() != "n0" {
-			// A node in the new cluster must agree and have elected a new leader
-			l := c1.Nodes["n4"].Node.GetLeader()
-			if l != "" && l == "n0" {
-				break
-			}
-		}
-	sleep:
-		time.Sleep(time.Millisecond * 500)
-	}
-	require.NotNil(t, c1.GetLeader())
 	require.NotEqual(t, c1.GetLeader().GetLeader(), "n0")
-	// Note: In the case where n1 is elected the new leader,
-	// n0 will know that n1 is the new leader sooner than later
-	// since connectivity from n0 to n1 was never interrupted.
-	// fmt.Printf("Cluster: %#v\n", c1.GetClusterStatus())
 
 	// Should persist new leader once communication is restored
 	c1.ClearErrors()
 
-	// Should pick up the leadership from the rest of the cluster
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
-		leader := c1.Nodes["n0"].Node.GetLeader()
-		assert.NotEqual(t, leader, "")
-	})
+	require.Eventually(t, func() bool {
+		return c1.Nodes["n0"].Node.GetLeader() != ""
+	}, 10*time.Second, 100*time.Millisecond)
 
-	s, err := c1.Nodes["n0"].Node.GetState(context.Background())
-	fmt.Printf("State: %#v\n", s)
-	require.NoError(t, err)
-	assert.Equal(t, "Follower", s.State)
+	s := c1.Nodes["n0"].Node.GetState()
+	assert.Equal(t, election.Follower, s.Role)
 }
 
 func TestMinimumQuorum(t *testing.T) {
 	c := NewTestCluster(t)
 
-	cfg := &election.Config{
+	minCfg := &election.Config{
 		NetworkTimeout:      time.Second,
 		HeartBeatTimeout:    time.Second,
 		LeaderQuorumTimeout: time.Second * 2,
@@ -357,7 +251,7 @@ func TestMinimumQuorum(t *testing.T) {
 		MinimumQuorum:       2,
 	}
 
-	err := c.SpawnNode("n0", cfg)
+	err := c.SpawnNode("n0", minCfg)
 	require.NoError(t, err)
 
 	time.Sleep(time.Second * 5)
@@ -366,14 +260,14 @@ func TestMinimumQuorum(t *testing.T) {
 	status := c.GetClusterStatus()
 	require.NotEqual(t, "n0", status["n0"])
 
-	err = c.SpawnNode("n1", cfg)
+	err = c.SpawnNode("n1", minCfg)
 	require.NoError(t, err)
 
 	// Should elect a leader
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.NotEqual(t, status["n0"], "")
-	})
+		return status["n0"] != ""
+	}, 10*time.Second, 100*time.Millisecond)
 
 	status = c.GetClusterStatus()
 	var leader string
@@ -390,10 +284,10 @@ func TestMinimumQuorum(t *testing.T) {
 	}
 
 	// The leader should detect it no longer has MinimumQuorum and step down
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, status[leader], "")
-	})
+		return status[leader] == ""
+	}, 10*time.Second, 100*time.Millisecond)
 }
 
 func TestResign(t *testing.T) {
@@ -401,13 +295,13 @@ func TestResign(t *testing.T) {
 	createCluster(t, c1)
 	defer c1.Close()
 
-	testutil.UntilPass(t, 30, time.Second, func(t testutil.TestingT) {
-		assert.NotNil(t, c1.GetLeader())
-	})
+	require.Eventually(t, func() bool {
+		return c1.GetLeader() != nil
+	}, 30*time.Second, 100*time.Millisecond)
 
 	leader := c1.GetLeader()
 
-	// Calling resign on a follower should have no effect
+	// Calling resign on a follower should return ErrNotLeader
 	err := c1.Nodes["n1"].Node.Resign(context.Background())
 	assert.ErrorContains(t, err, "not the leader")
 
@@ -417,13 +311,14 @@ func TestResign(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond * 500)
 	}
-	// Calling resign on the leader should give up leader
+
+	// Calling resign on the leader should give up leadership
 	err = c1.Nodes["n0"].Node.Resign(context.Background())
 	require.NoError(t, err)
 
-	testutil.UntilPass(t, 30, time.Second, func(t testutil.TestingT) {
-		assert.NotEqual(t, leader, c1.GetLeader())
-	})
+	require.Eventually(t, func() bool {
+		return c1.GetLeader() != leader
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 func TestResignSingleNode(t *testing.T) {
@@ -432,21 +327,22 @@ func TestResignSingleNode(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, ClusterStatus{
-			"n0": "n0",
-		}, status)
-	})
+		return status["n0"] == "n0"
+	}, 10*time.Second, 100*time.Millisecond)
 
 	err = c.Nodes["n0"].Node.Resign(context.Background())
 	require.NoError(t, err)
 
 	// n0 will eventually become leader again
-	testutil.UntilPass(t, 10, time.Second, func(t testutil.TestingT) {
+	require.Eventually(t, func() bool {
 		status := c.GetClusterStatus()
-		assert.Equal(t, ClusterStatus{
-			"n0": "n0",
-		}, status)
-	})
+		return status["n0"] == "n0"
+	}, 10*time.Second, 100*time.Millisecond)
+}
+
+// errConnRefused returns a sentinel error for simulating connection refused
+func errConnRefused() error {
+	return fmt.Errorf("connection refused")
 }
