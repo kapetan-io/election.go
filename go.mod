@@ -1,4 +1,4 @@
-module github.com/thrawn01/election
+module github.com/kapetan-io/election.go
 
 go 1.21.7
 

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thrawn01/election"
+	"github.com/kapetan-io/election.go"
 )
 
 func sendRPC(ctx context.Context, peer string, req election.RPCRequest) (election.RPCResponse, error) {

@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/thrawn01/election/internal/engine"
+	"github.com/kapetan-io/election.go/internal/engine"
 )
 
 // Re-exports from internal/engine (type aliases — transparent to callers)

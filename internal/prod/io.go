@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thrawn01/election/internal/engine"
+	"github.com/kapetan-io/election.go/internal/engine"
 )
 
 // SendRPCFunc is the function type for sending an RPC to a peer.

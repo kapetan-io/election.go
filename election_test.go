@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/thrawn01/election"
-	"github.com/thrawn01/election/internal/sim"
+	"github.com/kapetan-io/election.go"
+	"github.com/kapetan-io/election.go/internal/sim"
 )
 
 // TestSingleNodeLeader verifies that a single-node cluster becomes its own leader.

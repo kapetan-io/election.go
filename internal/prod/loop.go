@@ -4,7 +4,7 @@ import (
 	"time"
 
 	gocoro "github.com/resonatehq/gocoro"
-	"github.com/thrawn01/election/internal/engine"
+	"github.com/kapetan-io/election.go/internal/engine"
 )
 
 // Run drives the gocoro scheduler until all coroutines have finished.

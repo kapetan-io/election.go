@@ -3,7 +3,7 @@ package sim
 import (
 	"errors"
 
-	"github.com/thrawn01/election/internal/engine"
+	"github.com/kapetan-io/election.go/internal/engine"
 )
 
 // SimIO is the per-node IO adapter for simulation. It routes through the

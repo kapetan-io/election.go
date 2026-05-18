@@ -9,8 +9,8 @@ import (
 
 	gocoro "github.com/resonatehq/gocoro"
 
-	election "github.com/thrawn01/election"
-	"github.com/thrawn01/election/internal/engine"
+	election "github.com/kapetan-io/election.go"
+	"github.com/kapetan-io/election.go/internal/engine"
 )
 
 // Config holds configuration for a simulation run.

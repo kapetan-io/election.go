@@ -12,8 +12,8 @@ import (
 	gocoro "github.com/resonatehq/gocoro"
 	gocoroio "github.com/resonatehq/gocoro/pkg/io"
 
-	"github.com/thrawn01/election/internal/engine"
-	"github.com/thrawn01/election/internal/prod"
+	"github.com/kapetan-io/election.go/internal/engine"
+	"github.com/kapetan-io/election.go/internal/prod"
 )
 
 // compile-time interface conformance check

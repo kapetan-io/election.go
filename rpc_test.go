@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thrawn01/election"
+	"github.com/kapetan-io/election.go"
 )
 
 func TestRPCRequest(t *testing.T) {
