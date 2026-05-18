@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -63,12 +64,14 @@ type node struct {
 	rng              *rand.Rand
 
 	// Lifecycle — set by Start, used by Stop and public methods
-	started    atomic.Bool
-	eventCh    chan engine.Event
-	completeCh chan prod.Completion
-	doneCh     chan struct{}
-	sched      gocoro.Scheduler[engine.Req, engine.Resp]
-	io         *prod.ProdIO
+	started      atomic.Bool
+	stopped      atomic.Bool // true once forceShutdown has been called
+	shutdownOnce sync.Once   // ensures eventCh is closed at most once
+	eventCh      chan engine.Event
+	completeCh   chan prod.Completion
+	doneCh       chan struct{}
+	sched        gocoro.Scheduler[engine.Req, engine.Resp]
+	io           *prod.ProdIO
 }
 
 // NewNode creates a new election node. Call Start() to participate in the election.
@@ -184,9 +187,21 @@ func (n *node) Start(_ context.Context) error {
 // loop goroutine to exit. If the context expires before a clean shutdown,
 // it calls sched.Shutdown(), closes eventCh, and returns ctx.Err().
 // Calling Stop on a node that was never started returns nil immediately.
+// Calling Stop after a forced shutdown (context-cancelled Stop) returns nil.
 func (n *node) Stop(ctx context.Context) error {
 	if !n.started.Load() {
 		return nil
+	}
+
+	// If forceShutdown was already called (e.g., by a prior Stop with cancelled
+	// context), the eventCh is closed — skip the send and wait on doneCh.
+	if n.stopped.Load() {
+		select {
+		case <-n.doneCh:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	// Signal the coroutine to shut down
@@ -214,10 +229,13 @@ func (n *node) Stop(ctx context.Context) error {
 }
 
 // forceShutdown forcefully shuts down the scheduler and closes eventCh to
-// unblock any goroutine waiting on it.
+// unblock any goroutine waiting on it. Safe to call multiple times.
 func (n *node) forceShutdown() {
-	n.sched.Shutdown()
-	close(n.eventCh)
+	n.shutdownOnce.Do(func() {
+		n.stopped.Store(true)
+		n.sched.Shutdown()
+		close(n.eventCh)
+	})
 }
 
 // ReceiveRPC pushes an EventRPC into the event channel and waits for the

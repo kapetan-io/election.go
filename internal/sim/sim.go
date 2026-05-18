@@ -15,16 +15,20 @@ import (
 
 // Config holds configuration for a simulation run.
 type Config struct {
-	NumNodes   int
-	Seed       int64
-	DropRate   float64
-	NodeConfig map[string]NodeSimConfig
+	NumNodes      int
+	Seed          int64
+	DropRate      float64
+	MinimumQuorum int
+	NodeConfig    map[string]NodeSimConfig
 }
 
-// NodeSimConfig overrides per-node election timeouts.
+// NodeSimConfig overrides per-node election and quorum configuration.
 type NodeSimConfig struct {
-	ElectionTimeout  time.Duration
-	HeartBeatTimeout time.Duration
+	ElectionTimeout     time.Duration
+	HeartBeatTimeout    time.Duration
+	LeaderQuorumTimeout time.Duration
+	MinimumQuorum       int
+	OnLeaderChange      func(leader string)
 }
 
 // pendingRPC holds an RPC queued for delivery to a target node.
@@ -97,8 +101,9 @@ func New(conf Config) *Simulation {
 
 		// Build election config for this node
 		eConf := election.Config{
-			UniqueID: id,
-			Peers:    peers,
+			UniqueID:      id,
+			Peers:         peers,
+			MinimumQuorum: conf.MinimumQuorum,
 			// SendRPC is never called in simulation (SimIO routes directly),
 			// but NewNodeForSim requires a non-nil value.
 			SendRPC: func(_ context.Context, _ string, _ election.RPCRequest) (election.RPCResponse, error) {
@@ -108,8 +113,21 @@ func New(conf Config) *Simulation {
 
 		// Apply per-node config overrides
 		if nc, ok := conf.NodeConfig[id]; ok {
-			eConf.ElectionTimeout = nc.ElectionTimeout
-			eConf.HeartBeatTimeout = nc.HeartBeatTimeout
+			if nc.ElectionTimeout != 0 {
+				eConf.ElectionTimeout = nc.ElectionTimeout
+			}
+			if nc.HeartBeatTimeout != 0 {
+				eConf.HeartBeatTimeout = nc.HeartBeatTimeout
+			}
+			if nc.LeaderQuorumTimeout != 0 {
+				eConf.LeaderQuorumTimeout = nc.LeaderQuorumTimeout
+			}
+			if nc.MinimumQuorum != 0 {
+				eConf.MinimumQuorum = nc.MinimumQuorum
+			}
+			if nc.OnLeaderChange != nil {
+				eConf.OnLeaderChange = nc.OnLeaderChange
+			}
 		}
 
 		// Seed per-node RNG deterministically
@@ -195,6 +213,56 @@ func (s *Simulation) Node(id string) election.Node {
 		return sn.node
 	}
 	return nil
+}
+
+// SetPeers delivers a SetPeers event directly to the named node's SimIO and
+// steps the scheduler so the coroutine processes it. This bypasses the
+// production event channel (which is unused in simulation).
+func (s *Simulation) SetPeers(nodeID string, peers []string) {
+	sn, ok := s.nodes[nodeID]
+	if !ok {
+		return
+	}
+	var errResult error
+	done := make(chan error, 1)
+	sn.io.deliverEvent(engine.Event{
+		Kind:  engine.EventSetPeers,
+		Peers: peers,
+		Done: func(err error) {
+			errResult = err
+			done <- err
+		},
+	})
+	sn.sched.RunUntilBlocked(s.clock.Now().UnixNano())
+	select {
+	case <-done:
+	default:
+	}
+	_ = errResult
+}
+
+// Resign delivers a Resign event directly to the named node's SimIO and
+// steps the scheduler so the coroutine processes it. Returns ErrNotLeader
+// if the node is not the leader.
+func (s *Simulation) Resign(nodeID string) error {
+	sn, ok := s.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("unknown node: %s", nodeID)
+	}
+	result := make(chan error, 1)
+	sn.io.deliverEvent(engine.Event{
+		Kind: engine.EventResign,
+		Done: func(err error) {
+			result <- err
+		},
+	})
+	sn.sched.RunUntilBlocked(s.clock.Now().UnixNano())
+	select {
+	case err := <-result:
+		return err
+	default:
+		return fmt.Errorf("resign event not processed")
+	}
 }
 
 // Partition marks bidirectional isolation between all pairs of groupA × groupB.
