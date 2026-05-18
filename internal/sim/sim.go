@@ -28,7 +28,7 @@ type NodeSimConfig struct {
 	HeartBeatTimeout    time.Duration
 	LeaderQuorumTimeout time.Duration
 	MinimumQuorum       int
-	OnLeaderChange      func(leader string)
+	OnLeaderChange      func(leader string, term uint64)
 }
 
 // pendingRPC holds an RPC queued for delivery to a target node.

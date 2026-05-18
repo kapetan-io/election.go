@@ -118,7 +118,7 @@ type Config struct {
 	SendRPC SendRPCFunc
 
 	// OnLeaderChange is called whenever the leader changes
-	OnLeaderChange func(leader string)
+	OnLeaderChange func(leader string, term uint64)
 
 	// HeartBeatTimeout is how long followers wait before starting a new election
 	HeartBeatTimeout time.Duration

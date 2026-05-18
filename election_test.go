@@ -361,14 +361,19 @@ func TestPartitionedMinorityCantElect(t *testing.T) {
 // TestOnLeaderChangeCallback verifies that the OnLeaderChange callback fires
 // when a new leader is elected and again when the leader changes.
 func TestOnLeaderChangeCallback(t *testing.T) {
-	var mu sync.Mutex
-	changes := make(map[string][]string) // nodeID → list of leaders reported
+	type leaderChange struct {
+		leader string
+		term   uint64
+	}
 
-	collect := func(nodeID string) func(string) {
-		return func(leader string) {
+	var mu sync.Mutex
+	changes := make(map[string][]leaderChange) // nodeID → list of leader changes reported
+
+	collect := func(nodeID string) func(string, uint64) {
+		return func(leader string, term uint64) {
 			mu.Lock()
 			defer mu.Unlock()
-			changes[nodeID] = append(changes[nodeID], leader)
+			changes[nodeID] = append(changes[nodeID], leaderChange{leader: leader, term: term})
 		}
 	}
 
@@ -397,6 +402,23 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 	mu.Unlock()
 	assert.Greater(t, totalChanges, 0)
 
+	// Term delivered in the callback must be non-zero when a leader is set,
+	// and must match GetState().Term on the leader node at that point.
+	mu.Lock()
+	var firstElectionTerm uint64
+	for _, nodeChanges := range changes {
+		for _, c := range nodeChanges {
+			if c.leader != "" {
+				assert.NotZero(t, c.term)
+				firstElectionTerm = c.term
+			}
+		}
+	}
+	mu.Unlock()
+
+	leaderState := s.Node(leader).GetState()
+	assert.Equal(t, leaderState.Term, firstElectionTerm)
+
 	// Resign the leader and verify a second callback fires
 	err = s.Resign(leader)
 	require.NoError(t, err)
@@ -416,6 +438,25 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 	}
 	mu.Unlock()
 	assert.Greater(t, totalChanges2, totalChanges)
+
+	// When a new leader is elected, the Term must be strictly greater than
+	// the previous election's Term.
+	mu.Lock()
+	var secondElectionTerm uint64
+	for _, nodeChanges := range changes {
+		for _, c := range nodeChanges {
+			if c.leader == newLeader {
+				assert.NotZero(t, c.term)
+				secondElectionTerm = c.term
+			}
+		}
+	}
+	mu.Unlock()
+
+	assert.Greater(t, secondElectionTerm, firstElectionTerm)
+
+	newLeaderState := s.Node(newLeader).GetState()
+	assert.Equal(t, newLeaderState.Term, secondElectionTerm)
 }
 
 // TestReceiveRPCUnknownType verifies that ReceiveRPC returns an error response
