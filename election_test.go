@@ -410,14 +410,17 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 		for _, c := range nodeChanges {
 			if c.leader != "" {
 				assert.NotZero(t, c.term)
-				firstElectionTerm = c.term
+				if firstElectionTerm == 0 {
+					firstElectionTerm = c.term
+				}
+				assert.Equal(t, firstElectionTerm, c.term)
 			}
 		}
 	}
 	mu.Unlock()
 
 	leaderState := s.Node(leader).GetState()
-	assert.Equal(t, leaderState.Term, firstElectionTerm)
+	assert.Equal(t, firstElectionTerm, leaderState.Term)
 
 	// Resign the leader and verify a second callback fires
 	err = s.Resign(leader)
@@ -447,7 +450,10 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 		for _, c := range nodeChanges {
 			if c.leader == newLeader {
 				assert.NotZero(t, c.term)
-				secondElectionTerm = c.term
+				if secondElectionTerm == 0 {
+					secondElectionTerm = c.term
+				}
+				assert.Equal(t, secondElectionTerm, c.term)
 			}
 		}
 	}
@@ -456,7 +462,7 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 	assert.Greater(t, secondElectionTerm, firstElectionTerm)
 
 	newLeaderState := s.Node(newLeader).GetState()
-	assert.Equal(t, newLeaderState.Term, secondElectionTerm)
+	assert.Equal(t, secondElectionTerm, newLeaderState.Term)
 }
 
 // TestReceiveRPCUnknownType verifies that ReceiveRPC returns an error response

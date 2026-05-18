@@ -117,7 +117,9 @@ type Config struct {
 	// SendRPC sends an RPC request to a peer
 	SendRPC SendRPCFunc
 
-	// OnLeaderChange is called whenever the leader changes
+	// OnLeaderChange is called whenever the leader changes.
+	// It runs synchronously in the election goroutine; do not call
+	// Resign, SetPeers, Stop, or ReceiveRPC from this callback.
 	OnLeaderChange func(leader string, term uint64)
 
 	// HeartBeatTimeout is how long followers wait before starting a new election
