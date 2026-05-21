@@ -36,19 +36,21 @@ type Resp struct {
 type EventKind int
 
 const (
-	EventRPC      EventKind = iota + 1
+	EventRPC         EventKind = iota + 1
 	EventTimer
 	EventSetPeers
 	EventResign
 	EventShutdown
+	EventSetMetadata
 )
 
 // Event carries inbound messages delivered via Recv
 type Event struct {
-	Kind    EventKind
-	RPCReq  RPCRequest
-	TimerID int64
-	Peers   []string
-	Respond func(RPCResponse)
-	Done    func(error)
+	Kind     EventKind
+	RPCReq   RPCRequest
+	TimerID  int64
+	Peers    []string
+	Metadata []byte
+	Respond  func(RPCResponse)
+	Done     func(error)
 }

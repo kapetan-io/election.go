@@ -241,6 +241,31 @@ func (s *Simulation) SetPeers(nodeID string, peers []string) {
 	_ = errResult
 }
 
+// SetMetadata delivers a SetMetadata event directly to the named node's SimIO
+// and steps the scheduler so the coroutine processes it.
+func (s *Simulation) SetMetadata(nodeID string, metadata []byte) {
+	sn, ok := s.nodes[nodeID]
+	if !ok {
+		return
+	}
+	var errResult error
+	done := make(chan error, 1)
+	sn.io.deliverEvent(engine.Event{
+		Kind:     engine.EventSetMetadata,
+		Metadata: metadata,
+		Done: func(err error) {
+			errResult = err
+			done <- err
+		},
+	})
+	sn.sched.RunUntilBlocked(s.clock.Now().UnixNano())
+	select {
+	case <-done:
+	default:
+	}
+	_ = errResult
+}
+
 // Resign delivers a Resign event directly to the named node's SimIO and
 // steps the scheduler so the coroutine processes it. Returns ErrNotLeader
 // if the node is not the leader.

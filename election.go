@@ -1,6 +1,7 @@
 package election
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -52,9 +53,10 @@ type node struct {
 	electionsWon     atomic.Uint64
 
 	// Coroutine-only state (not safe for concurrent access)
-	currentTerm  uint64
-	currentRole  int
-	vote         struct {
+	currentTerm     uint64
+	currentRole     int
+	currentMetadata []byte
+	vote            struct {
 		LastCandidate string
 		LastTerm      uint64
 	}
@@ -102,12 +104,14 @@ func NewNode(conf Config) (Node, error) {
 	}
 
 	initialPeers := peersFromStrings(conf.Peers)
+	applySelfMetadata(conf.UniqueID, conf.Metadata, initialPeers)
 	n := &node{
-		conf:         conf,
-		self:         conf.UniqueID,
-		log:          conf.Log,
-		currentPeers: initialPeers,
-		rng:          rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		conf:            conf,
+		self:            conf.UniqueID,
+		log:             conf.Log,
+		currentPeers:    initialPeers,
+		currentMetadata: conf.Metadata,
+		rng:             rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		// Pre-allocate the event channel so it is safe to read in ReceiveRPC,
 		// SetPeers, and Resign even before Start is called.
 		eventCh:    make(chan engine.Event, 1000),
@@ -165,6 +169,10 @@ func (n *node) Stats() Stats {
 func (n *node) Start(_ context.Context) error {
 	if !n.started.CompareAndSwap(false, true) {
 		return errors.New("node already started")
+	}
+
+	if len(n.conf.Metadata) > maxMetadataSize {
+		return ErrMetadataTooLarge
 	}
 
 	// The event and completion channels are pre-allocated in NewNode so they
@@ -315,6 +323,45 @@ func (n *node) SetPeers(ctx context.Context, peers []string) error {
 	}
 }
 
+// SetMetadata updates this node's opaque metadata blob. Returns ErrMetadataTooLarge
+// if the blob exceeds 1KB. If the node has not been started yet, the update is
+// applied directly. After start, it is delivered through the event channel.
+func (n *node) SetMetadata(ctx context.Context, metadata []byte) error {
+	if len(metadata) > maxMetadataSize {
+		return ErrMetadataTooLarge
+	}
+
+	if !n.started.Load() {
+		// Node not started — update directly (no coroutine running yet)
+		n.currentMetadata = metadata
+		applySelfMetadata(n.self, metadata, n.currentPeers)
+		n.peers.Store(slices.Clone(n.currentPeers))
+		return nil
+	}
+
+	doneCh := make(chan error, 1)
+	event := engine.Event{
+		Kind:     engine.EventSetMetadata,
+		Metadata: metadata,
+		Done: func(err error) {
+			doneCh <- err
+		},
+	}
+
+	select {
+	case n.eventCh <- event:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-doneCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Resign pushes an EventResign into the event channel and waits for the
 // coroutine to process it. Returns ErrNotLeader if the node is not the leader.
 func (n *node) Resign(ctx context.Context) error {
@@ -430,6 +477,9 @@ func (n *node) runFollower(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]
 		case engine.EventSetPeers:
 			n.handleSetPeers(c, event, SetPeersReq{Peers: event.Peers})
 
+		case engine.EventSetMetadata:
+			n.handleSetMetadata(c, event)
+
 		case engine.EventResign:
 			if event.Done != nil {
 				event.Done(ErrNotLeader)
@@ -530,6 +580,9 @@ func (n *node) runCandidate(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}
 
 		case engine.EventSetPeers:
 			n.handleSetPeers(c, event, SetPeersReq{Peers: event.Peers})
+
+		case engine.EventSetMetadata:
+			n.handleSetMetadata(c, event)
 
 		case engine.EventResign:
 			if event.Done != nil {
@@ -701,6 +754,13 @@ func (n *node) runLeader(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) 
 				n.sendHeartBeats(c)
 			}
 
+		case engine.EventSetMetadata:
+			n.handleSetMetadata(c, event)
+			// Immediately propagate new metadata to followers
+			if n.currentRole == roleLeader {
+				n.sendHeartBeats(c)
+			}
+
 		case engine.EventResign:
 			n.handleResign(c, event)
 			if n.currentRole != roleLeader {
@@ -733,6 +793,7 @@ func (n *node) runLeader(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) 
 // Spawned coroutines update peersLastContact directly (safe because coroutines are cooperative).
 func (n *node) sendHeartBeats(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) {
 	term := n.currentTerm
+	metadataCopy := n.currentMetadata
 	for _, peer := range n.currentPeers {
 		if peer.Address == n.self {
 			continue
@@ -746,8 +807,9 @@ func (n *node) sendHeartBeats(c gocoro.Coroutine[engine.Req, engine.Resp, struct
 				RPCReq: engine.RPCRequest{
 					RPC: engine.HeartBeatRPC,
 					Request: engine.HeartBeatReq{
-						Term:   term,
-						Leader: selfCopy,
+						Term:     term,
+						Leader:   selfCopy,
+						Metadata: metadataCopy,
 					},
 				},
 			})
@@ -766,6 +828,17 @@ func (n *node) sendHeartBeats(c gocoro.Coroutine[engine.Req, engine.Resp, struct
 			}
 			nowResp, _ := gocoro.YieldAndAwait(cc, engine.Req{Kind: engine.Now})
 			n.peersLastContact[peerCopy] = nowResp.Time
+			// Update peer metadata if it changed
+			for i := range n.currentPeers {
+				if n.currentPeers[i].Address == peerCopy {
+					if !bytes.Equal(n.currentPeers[i].Metadata, hResp.Metadata) {
+						n.currentPeers[i].Metadata = hResp.Metadata
+						n.peers.Store(slices.Clone(n.currentPeers))
+						n.fireOnChange()
+					}
+					break
+				}
+			}
 			return struct{}{}, nil
 		})
 	}
@@ -816,6 +889,8 @@ func (n *node) processRPC(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}],
 		n.handleResign(c, event)
 	case SetPeersReq:
 		n.handleSetPeers(c, event, cmd)
+	case SetMetadataReq:
+		n.handleSetMetadata(c, event)
 	default:
 		n.log.Error("unexpected RPC command", "request", event.RPCReq.Request)
 		if event.Respond != nil {
@@ -884,7 +959,8 @@ func (n *node) handleHeartBeat(c gocoro.Coroutine[engine.Req, engine.Resp, struc
 	n.log.Debug("RPC: HeartBeatReq", "req", req)
 
 	resp := HeartBeatResp{
-		Term: n.currentTerm,
+		Term:     n.currentTerm,
+		Metadata: n.currentMetadata,
 	}
 
 	defer func() {
@@ -910,6 +986,18 @@ func (n *node) handleHeartBeat(c gocoro.Coroutine[engine.Req, engine.Resp, struc
 	// Record the leader from the heartbeat
 	n.setLeader(req.Leader)
 	n.heartbeatsRecv.Add(1)
+
+	// Update leader's metadata in currentPeers if it changed
+	for i := range n.currentPeers {
+		if n.currentPeers[i].Address == req.Leader {
+			if !bytes.Equal(n.currentPeers[i].Metadata, req.Metadata) {
+				n.currentPeers[i].Metadata = req.Metadata
+				n.peers.Store(slices.Clone(n.currentPeers))
+				n.fireOnChange()
+			}
+			break
+		}
+	}
 
 	// Update last contact time via Now yield
 	nowResp, _ := gocoro.YieldAndAwait(c, engine.Req{Kind: engine.Now})
@@ -952,6 +1040,17 @@ func (n *node) handleResign(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}
 func (n *node) handleSetPeers(_ gocoro.Coroutine[engine.Req, engine.Resp, struct{}], event engine.Event, req SetPeersReq) {
 	n.log.Debug("RPC: SetPeersReq", "peers", req.Peers)
 	n.currentPeers = peersFromStrings(req.Peers)
+	applySelfMetadata(n.self, n.currentMetadata, n.currentPeers)
+	n.peers.Store(slices.Clone(n.currentPeers))
+	if event.Done != nil {
+		event.Done(nil)
+	}
+}
+
+func (n *node) handleSetMetadata(_ gocoro.Coroutine[engine.Req, engine.Resp, struct{}], event engine.Event) {
+	n.log.Debug("EventSetMetadata")
+	n.currentMetadata = event.Metadata
+	applySelfMetadata(n.self, n.currentMetadata, n.currentPeers)
 	n.peers.Store(slices.Clone(n.currentPeers))
 	if event.Done != nil {
 		event.Done(nil)
@@ -991,6 +1090,17 @@ func peersFromStrings(addrs []string) []Peer {
 		peers[i] = Peer{Address: addr}
 	}
 	return peers
+}
+
+// applySelfMetadata finds the self entry in peers and sets its Metadata field.
+// Other peers get nil metadata (populated on next heartbeat cycle).
+func applySelfMetadata(self string, metadata []byte, peers []Peer) {
+	for i := range peers {
+		if peers[i].Address == self {
+			peers[i].Metadata = metadata
+			return
+		}
+	}
 }
 
 func (n *node) quorumSize() int {
@@ -1037,15 +1147,17 @@ func NewNodeForSim(conf Config, rng *rand.Rand) (Node, error) {
 	}
 
 	initialPeers := peersFromStrings(conf.Peers)
+	applySelfMetadata(conf.UniqueID, conf.Metadata, initialPeers)
 	n := &node{
-		conf:         conf,
-		self:         conf.UniqueID,
-		log:          conf.Log,
-		currentPeers: initialPeers,
-		rng:          rng,
-		eventCh:      make(chan engine.Event, 1000),
-		completeCh:   make(chan prod.Completion, 1000),
-		doneCh:       make(chan struct{}),
+		conf:            conf,
+		self:            conf.UniqueID,
+		log:             conf.Log,
+		currentPeers:    initialPeers,
+		currentMetadata: conf.Metadata,
+		rng:             rng,
+		eventCh:         make(chan engine.Event, 1000),
+		completeCh:      make(chan prod.Completion, 1000),
+		doneCh:          make(chan struct{}),
 	}
 	n.peers.Store(slices.Clone(initialPeers))
 	n.leader.Store("")

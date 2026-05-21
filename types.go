@@ -23,6 +23,8 @@ type ResignReq = engine.ResignReq
 type ResignResp = engine.ResignResp
 type SetPeersReq = engine.SetPeersReq
 type SetPeersResp = engine.SetPeersResp
+type SetMetadataReq = engine.SetMetadataReq
+type SetMetadataResp = engine.SetMetadataResp
 type Peer = engine.Peer
 
 const (
@@ -31,6 +33,7 @@ const (
 	ResetElectionRPC = engine.ResetElectionRPC
 	ResignRPC        = engine.ResignRPC
 	SetPeersRPC      = engine.SetPeersRPC
+	SetMetadataRPC   = engine.SetMetadataRPC
 )
 
 // Role represents the role of a node in the election
@@ -77,6 +80,12 @@ type Stats struct {
 // SendRPCFunc sends an RPC request to a peer and returns the response
 type SendRPCFunc func(ctx context.Context, peer string, req RPCRequest) (RPCResponse, error)
 
+// maxMetadataSize is the maximum allowed size of a metadata blob in bytes
+const maxMetadataSize = 1024
+
+// ErrMetadataTooLarge is returned when a metadata blob exceeds maxMetadataSize
+var ErrMetadataTooLarge = errors.New("metadata exceeds 1KB limit")
+
 // Node is the public interface for an election node
 type Node interface {
 	// Start begins participating in the election
@@ -87,6 +96,10 @@ type Node interface {
 
 	// SetPeers updates the list of peers considered in the election
 	SetPeers(ctx context.Context, peers []string) error
+
+	// SetMetadata updates this node's opaque metadata blob. Returns ErrMetadataTooLarge
+	// if the blob exceeds 1KB. The update is propagated to peers on the next heartbeat cycle.
+	SetMetadata(ctx context.Context, metadata []byte) error
 
 	// Resign steps down as leader; returns ErrNotLeader if not currently leader
 	Resign(ctx context.Context) error
@@ -114,6 +127,10 @@ type Config struct {
 
 	// Peers is the initial list of peers to consider in the election, including this node
 	Peers []string
+
+	// Metadata is the initial opaque metadata blob for this node (max 1KB).
+	// Validated at Start(); returns ErrMetadataTooLarge if exceeded.
+	Metadata []byte
 
 	// SendRPC sends an RPC request to a peer
 	SendRPC SendRPCFunc

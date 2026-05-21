@@ -11,6 +11,7 @@ const (
 	ResetElectionRPC RPC = "reset_election"
 	ResignRPC        RPC = "resign"
 	SetPeersRPC      RPC = "set_peers"
+	SetMetadataRPC   RPC = "set_metadata"
 )
 
 // Peer represents a node in the election cluster
@@ -82,6 +83,12 @@ func (r *RPCRequest) UnmarshalJSON(s []byte) error {
 			return err
 		}
 		r.Request = req
+	case SetMetadataRPC:
+		var req SetMetadataReq
+		if err := json.Unmarshal(in.Request, &req); err != nil {
+			return err
+		}
+		r.Request = req
 	}
 	return nil
 }
@@ -144,6 +151,12 @@ func (r *RPCResponse) UnmarshalJSON(s []byte) error {
 			return err
 		}
 		r.Response = resp
+	case SetMetadataRPC:
+		var resp SetMetadataResp
+		if err := json.Unmarshal(in.Response, &resp); err != nil {
+			return err
+		}
+		r.Response = resp
 	}
 	return nil
 }
@@ -162,13 +175,15 @@ type VoteResp struct {
 
 // HeartBeatReq is sent by the leader to all followers
 type HeartBeatReq struct {
-	Term   uint64 `json:"term"`
-	Leader string `json:"leader"`
+	Term     uint64 `json:"term"`
+	Leader   string `json:"leader"`
+	Metadata []byte `json:"metadata,omitempty"`
 }
 
 // HeartBeatResp is the response to a HeartBeatReq
 type HeartBeatResp struct {
-	Term uint64 `json:"term"`
+	Term     uint64 `json:"term"`
+	Metadata []byte `json:"metadata,omitempty"`
 }
 
 // ResetElectionReq resets the current state of a node to 'candidate'
@@ -192,3 +207,11 @@ type SetPeersReq struct {
 
 // SetPeersResp is the response to a SetPeersReq
 type SetPeersResp struct{}
+
+// SetMetadataReq sets the metadata blob for this node
+type SetMetadataReq struct {
+	Metadata []byte `json:"metadata"`
+}
+
+// SetMetadataResp is the response to a SetMetadataReq
+type SetMetadataResp struct{}

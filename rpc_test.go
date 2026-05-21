@@ -67,6 +67,26 @@ func TestRPCRequest(t *testing.T) {
 			},
 			out: `{"rpc":"set_peers","request":{"peers":["n0","n1"]}}`,
 		},
+		{
+			name: "heartbeat-with-metadata",
+			in: election.RPCRequest{
+				RPC: election.HeartBeatRPC,
+				Request: election.HeartBeatReq{
+					Leader:   "node1",
+					Term:     1,
+					Metadata: []byte("hello"),
+				},
+			},
+			out: `{"rpc":"heartbeat","request":{"term":1,"leader":"node1","metadata":"aGVsbG8="}}`,
+		},
+		{
+			name: "set-metadata",
+			in: election.RPCRequest{
+				RPC:     election.SetMetadataRPC,
+				Request: election.SetMetadataReq{Metadata: []byte("hello")},
+			},
+			out: `{"rpc":"set_metadata","request":{"metadata":"aGVsbG8="}}`,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			b, err := json.Marshal(tt.in)
@@ -152,6 +172,25 @@ func TestRPCResponse(t *testing.T) {
 				Response: election.SetPeersResp{},
 			},
 			out: `{"rpc":"set_peers","response":{}}`,
+		},
+		{
+			name: "heartbeat-with-metadata",
+			in: election.RPCResponse{
+				RPC: election.HeartBeatRPC,
+				Response: election.HeartBeatResp{
+					Term:     1,
+					Metadata: []byte("hello"),
+				},
+			},
+			out: `{"rpc":"heartbeat","response":{"term":1,"metadata":"aGVsbG8="}}`,
+		},
+		{
+			name: "set-metadata",
+			in: election.RPCResponse{
+				RPC:      election.SetMetadataRPC,
+				Response: election.SetMetadataResp{},
+			},
+			out: `{"rpc":"set_metadata","response":{}}`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
