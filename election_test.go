@@ -465,6 +465,70 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 	assert.Equal(t, secondElectionTerm, newLeaderState.Term)
 }
 
+// TestUnknownPeerCanWinElection verifies that a node not in other nodes'
+// currentPeers can still win an election. This simulates DNS propagation delay:
+// a 5-node cluster starts normally, then n0-n3's DNS view is updated to exclude
+// n4 (simulating n4 disappearing from DNS). n4 still knows about everyone.
+//
+// After the leader is partitioned and the remaining followers are isolated
+// from each other, n4 is the only node that can achieve quorum:
+//   - n0-n3 only know about [n0, n1, n2, n3] (quorum=3). When isolated from
+//     each other, none can gather enough votes.
+//   - n4 knows about [n0, n1, n2, n3, n4] and can reach all non-leader nodes,
+//     collecting enough votes to win despite not being in their peer lists.
+func TestUnknownPeerCanWinElection(t *testing.T) {
+	s := sim.New(sim.Config{NumNodes: 5, Seed: 42})
+
+	// Elect a leader normally with all 5 nodes participating.
+	// This ensures all nodes are at a consistent term.
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+	assert.Equal(t, 1, s.LeaderCount())
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	// Simulate DNS update: n0-n3 re-resolve and no longer see n4.
+	// n4's DNS still includes all 5 nodes.
+	peersWithoutN4 := []string{"n0", "n1", "n2", "n3"}
+	for _, id := range peersWithoutN4 {
+		s.SetPeers(id, peersWithoutN4)
+	}
+
+	// Let the cluster stabilize — the leader heartbeats n0-n3 only,
+	// n4 receives no heartbeats but its term is current.
+	s.RunFor(10 * time.Second)
+
+	// Identify the non-leader followers (excluding n4)
+	followers := []string{}
+	for _, id := range peersWithoutN4 {
+		if id != leader {
+			followers = append(followers, id)
+		}
+	}
+
+	// Partition the leader away from everyone
+	s.Partition([]string{leader}, []string{"n0", "n1", "n2", "n3", "n4"})
+
+	// Isolate the remaining followers from each other so they can't form
+	// quorum among themselves (each needs 3 votes from [n0,n1,n2,n3] but
+	// can only reach itself).
+	for i := 0; i < len(followers); i++ {
+		for j := i + 1; j < len(followers); j++ {
+			s.Partition([]string{followers[i]}, []string{followers[j]})
+		}
+	}
+
+	// n4 is NOT partitioned from any follower — it can reach all of them.
+	// When n4 starts an election, followers will vote for it despite n4
+	// not being in their currentPeers — handleVote has no peer whitelist.
+	s.RunFor(60 * time.Second)
+
+	assert.False(t, s.Node(leader).IsLeader())
+	assert.Equal(t, 1, s.LeaderCount())
+	assert.Equal(t, "n4", s.Leader())
+}
+
 // TestReceiveRPCUnknownType verifies that ReceiveRPC returns an error response
 // (without blocking) when called with an RPC type that is not accepted from peers.
 func TestReceiveRPCUnknownType(t *testing.T) {
