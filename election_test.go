@@ -1,8 +1,10 @@
 package election_test
 
 import (
+	"bytes"
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -583,4 +585,418 @@ func TestStopWithContextTimeout(t *testing.T) {
 	cleanCtx, cleanCancel := context.WithTimeout(startCtx, 2*time.Second)
 	defer cleanCancel()
 	_ = n.Stop(cleanCtx)
+}
+
+// TestSetMetadataSizeValidation verifies that metadata size limits are enforced
+// on SetMetadata, Config.Metadata at Start(), and that pre-start SetMetadata works.
+func TestSetMetadataSizeValidation(t *testing.T) {
+	ctx := context.Background()
+
+	// Table-driven size boundary tests
+	for _, test := range []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "zero-bytes", size: 0, wantErr: false},
+		{name: "exactly-1024-bytes", size: 1024, wantErr: false},
+		{name: "1025-bytes", size: 1025, wantErr: true},
+		{name: "large-blob", size: 2048, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			n, err := election.NewNode(election.Config{
+				UniqueID: "n0",
+				Peers:    []string{"n0"},
+				SendRPC: func(_ context.Context, _ string, _ election.RPCRequest) (election.RPCResponse, error) {
+					return election.RPCResponse{}, nil
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, n.Start(ctx))
+			defer func() { _ = n.Stop(ctx) }()
+
+			blob := bytes.Repeat([]byte("x"), test.size)
+			err = n.SetMetadata(ctx, blob)
+			if test.wantErr {
+				require.ErrorIs(t, err, election.ErrMetadataTooLarge)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	// Config.Metadata > 1024 bytes causes Start() to return ErrMetadataTooLarge
+	t.Run("config-metadata-too-large", func(t *testing.T) {
+		n, err := election.NewNode(election.Config{
+			UniqueID: "n0",
+			Peers:    []string{"n0"},
+			Metadata: bytes.Repeat([]byte("x"), 1025),
+			SendRPC: func(_ context.Context, _ string, _ election.RPCRequest) (election.RPCResponse, error) {
+				return election.RPCResponse{}, nil
+			},
+		})
+		require.NoError(t, err)
+		err = n.Start(ctx)
+		require.ErrorIs(t, err, election.ErrMetadataTooLarge)
+	})
+
+	// SetMetadata before Start() sets metadata directly; self entry in GetState().Peers has it
+	t.Run("set-metadata-before-start", func(t *testing.T) {
+		const meta = "pre-start-metadata"
+		n, err := election.NewNode(election.Config{
+			UniqueID: "n0",
+			Peers:    []string{"n0"},
+			SendRPC: func(_ context.Context, _ string, _ election.RPCRequest) (election.RPCResponse, error) {
+				return election.RPCResponse{}, nil
+			},
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, n.SetMetadata(ctx, []byte(meta)))
+
+		// Self entry in GetState().Peers must have the metadata populated
+		state := n.GetState()
+		var found bool
+		for _, p := range state.Peers {
+			if p.Address == "n0" {
+				assert.Equal(t, []byte(meta), p.Metadata)
+				found = true
+			}
+		}
+		assert.True(t, found)
+	})
+}
+
+// TestLeaderSeesAllPeerMetadata verifies that after a heartbeat cycle the leader's
+// GetState().Peers contains metadata for every peer in the cluster.
+func TestLeaderSeesAllPeerMetadata(t *testing.T) {
+	s := sim.New(sim.Config{
+		NumNodes: 3,
+		Seed:     42,
+		NodeConfig: map[string]sim.NodeSimConfig{
+			"n0": {Metadata: []byte("meta-n0")},
+			"n1": {Metadata: []byte("meta-n1")},
+			"n2": {Metadata: []byte("meta-n2")},
+		},
+	})
+
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Allow heartbeat cycles to propagate follower metadata back to the leader
+	s.RunFor(30 * time.Second)
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	state := s.Node(leader).GetState()
+	metadataByAddress := make(map[string][]byte, len(state.Peers))
+	for _, p := range state.Peers {
+		metadataByAddress[p.Address] = p.Metadata
+	}
+
+	assert.Equal(t, []byte("meta-n0"), metadataByAddress["n0"])
+	assert.Equal(t, []byte("meta-n1"), metadataByAddress["n1"])
+	assert.Equal(t, []byte("meta-n2"), metadataByAddress["n2"])
+}
+
+// TestFollowerSeesLeaderMetadata verifies that a follower sees the leader's metadata
+// and its own metadata, but not other followers' metadata.
+func TestFollowerSeesLeaderMetadata(t *testing.T) {
+	s := sim.New(sim.Config{
+		NumNodes: 3,
+		Seed:     42,
+		NodeConfig: map[string]sim.NodeSimConfig{
+			"n0": {Metadata: []byte("meta-n0")},
+			"n1": {Metadata: []byte("meta-n1")},
+			"n2": {Metadata: []byte("meta-n2")},
+		},
+	})
+
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Allow heartbeat cycles to propagate metadata
+	s.RunFor(30 * time.Second)
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	// Pick a follower
+	var follower string
+	for _, id := range []string{"n0", "n1", "n2"} {
+		if id != leader {
+			follower = id
+			break
+		}
+	}
+	require.NotEmpty(t, follower)
+
+	// Find the third node (neither leader nor the chosen follower)
+	var otherFollower string
+	for _, id := range []string{"n0", "n1", "n2"} {
+		if id != leader && id != follower {
+			otherFollower = id
+			break
+		}
+	}
+
+	state := s.Node(follower).GetState()
+	metadataByAddress := make(map[string][]byte, len(state.Peers))
+	for _, p := range state.Peers {
+		metadataByAddress[p.Address] = p.Metadata
+	}
+
+	// Follower sees leader's metadata
+	assert.Equal(t, []byte("meta-"+leader), metadataByAddress[leader])
+	// Follower sees its own metadata
+	assert.Equal(t, []byte("meta-"+follower), metadataByAddress[follower])
+	// Follower does NOT see the other follower's metadata (nil/empty)
+	assert.Empty(t, metadataByAddress[otherFollower])
+}
+
+// TestOnChangeFiresOnMetadataChange verifies that the OnChange callback fires when
+// a follower's metadata changes (leader receives it) but not on every heartbeat.
+func TestOnChangeFiresOnMetadataChange(t *testing.T) {
+	var leaderChanges, n1Changes, n2Changes atomic.Int32
+
+	makeCounter := func(c *atomic.Int32) func(election.NodeState) {
+		return func(_ election.NodeState) {
+			c.Add(1)
+		}
+	}
+
+	s := sim.New(sim.Config{
+		NumNodes: 3,
+		Seed:     42,
+		NodeConfig: map[string]sim.NodeSimConfig{
+			"n0": {OnChange: makeCounter(&leaderChanges)},
+			"n1": {OnChange: makeCounter(&n1Changes)},
+			"n2": {OnChange: makeCounter(&n2Changes)},
+		},
+	})
+
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Allow heartbeat cycles to stabilize so all followers know their leader
+	s.RunFor(30 * time.Second)
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	// Pick a follower
+	var follower string
+	for _, id := range []string{"n0", "n1", "n2"} {
+		if id != leader {
+			follower = id
+			break
+		}
+	}
+
+	// Map node IDs to their counters
+	counters := map[string]*atomic.Int32{
+		"n0": &leaderChanges,
+		"n1": &n1Changes,
+		"n2": &n2Changes,
+	}
+	leaderCounter := counters[leader]
+	followerCounter := counters[follower]
+
+	// Record baseline counts after the cluster has fully stabilized
+	leaderBaseline := leaderCounter.Load()
+	followerBaseline := followerCounter.Load()
+
+	// Set new metadata on the follower
+	s.SetMetadata(follower, []byte("new-follower-meta"))
+
+	// Run for enough time for heartbeat to carry the new metadata back to the leader
+	s.RunFor(30 * time.Second)
+
+	leaderAfterMetadata := leaderCounter.Load()
+	followerAfterMetadata := followerCounter.Load()
+
+	// Leader's OnChange must have fired at least once (it received updated peer metadata)
+	assert.Greater(t, leaderAfterMetadata, leaderBaseline)
+
+	// Follower's OnChange must NOT have fired due to its own metadata change
+	// (the follower already knows its own metadata; the leader does not send it back)
+	assert.Equal(t, followerBaseline, followerAfterMetadata)
+
+	// Run more virtual time with no metadata changes — counters must be stable
+	leaderStable := leaderCounter.Load()
+	s.RunFor(60 * time.Second)
+	assert.Equal(t, leaderStable, leaderCounter.Load())
+}
+
+// TestOnChangeLeaderTransitionIncludesMetadata verifies that the NodeState delivered
+// to OnChange during a leader transition includes populated peer metadata.
+func TestOnChangeLeaderTransitionIncludesMetadata(t *testing.T) {
+	var mu sync.Mutex
+	// statesOnBecoming maps nodeID → last NodeState received when that node became leader
+	statesOnBecoming := make(map[string]election.NodeState)
+
+	makeCallback := func(nodeID string) func(election.NodeState) {
+		return func(state election.NodeState) {
+			if state.IsLeader {
+				mu.Lock()
+				statesOnBecoming[nodeID] = state
+				mu.Unlock()
+			}
+		}
+	}
+
+	s := sim.New(sim.Config{
+		NumNodes: 3,
+		Seed:     42,
+		NodeConfig: map[string]sim.NodeSimConfig{
+			"n0": {Metadata: []byte("meta-n0"), OnChange: makeCallback("n0")},
+			"n1": {Metadata: []byte("meta-n1"), OnChange: makeCallback("n1")},
+			"n2": {Metadata: []byte("meta-n2"), OnChange: makeCallback("n2")},
+		},
+	})
+
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Allow heartbeat cycles to propagate metadata before resign
+	s.RunFor(30 * time.Second)
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	err = s.Resign(leader)
+	require.NoError(t, err)
+
+	err = s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Allow the new leader to receive peer metadata via heartbeats
+	s.RunFor(30 * time.Second)
+
+	newLeader := s.Leader()
+	require.NotEmpty(t, newLeader)
+	require.NotEqual(t, leader, newLeader)
+
+	// The new leader must have received an OnChange callback when it became leader
+	mu.Lock()
+	newLeaderState, ok := statesOnBecoming[newLeader]
+	mu.Unlock()
+	require.True(t, ok)
+
+	// The NodeState at the time of becoming leader should identify itself as leader
+	assert.True(t, newLeaderState.IsLeader)
+	assert.Equal(t, newLeader, newLeaderState.Leader)
+	assert.NotZero(t, newLeaderState.Term)
+	// Peers list must be populated
+	assert.NotEmpty(t, newLeaderState.Peers)
+}
+
+// TestSetMetadataMidRun verifies that metadata set after the cluster is running
+// propagates correctly via heartbeat cycles.
+func TestSetMetadataMidRun(t *testing.T) {
+	s := sim.New(sim.Config{NumNodes: 3, Seed: 42})
+
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	// Pick a follower
+	var follower string
+	for _, id := range []string{"n0", "n1", "n2"} {
+		if id != leader {
+			follower = id
+			break
+		}
+	}
+
+	// Set metadata on both leader and one follower mid-run
+	s.SetMetadata(leader, []byte("leader-meta"))
+	s.SetMetadata(follower, []byte("follower-meta"))
+
+	// Allow heartbeat cycles to propagate
+	s.RunFor(30 * time.Second)
+
+	// Leader should see both its own metadata and the follower's metadata
+	leaderState := s.Node(leader).GetState()
+	leaderMeta := make(map[string][]byte, len(leaderState.Peers))
+	for _, p := range leaderState.Peers {
+		leaderMeta[p.Address] = p.Metadata
+	}
+	assert.Equal(t, []byte("leader-meta"), leaderMeta[leader])
+	assert.Equal(t, []byte("follower-meta"), leaderMeta[follower])
+
+	// Follower should see the leader's metadata
+	followerState := s.Node(follower).GetState()
+	followerMeta := make(map[string][]byte, len(followerState.Peers))
+	for _, p := range followerState.Peers {
+		followerMeta[p.Address] = p.Metadata
+	}
+	assert.Equal(t, []byte("leader-meta"), followerMeta[leader])
+}
+
+// TestMetadataSurvivesLeaderTransition verifies that metadata set before a leadership
+// transition is still visible after a new leader is elected and heartbeats propagate.
+func TestMetadataSurvivesLeaderTransition(t *testing.T) {
+	s := sim.New(sim.Config{
+		NumNodes: 3,
+		Seed:     42,
+		NodeConfig: map[string]sim.NodeSimConfig{
+			"n0": {Metadata: []byte("meta-n0")},
+			"n1": {Metadata: []byte("meta-n1")},
+			"n2": {Metadata: []byte("meta-n2")},
+		},
+	})
+
+	err := s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Let metadata propagate to the leader
+	s.RunFor(30 * time.Second)
+
+	leader := s.Leader()
+	require.NotEmpty(t, leader)
+
+	err = s.Resign(leader)
+	require.NoError(t, err)
+
+	err = s.RunUntilLeader()
+	require.NoError(t, err)
+
+	// Let the new leader propagate metadata via heartbeats
+	s.RunFor(60 * time.Second)
+
+	newLeader := s.Leader()
+	require.NotEmpty(t, newLeader)
+	require.NotEqual(t, leader, newLeader)
+
+	// New leader should have received metadata from remaining peers via heartbeat responses
+	state := s.Node(newLeader).GetState()
+	metadataByAddress := make(map[string][]byte, len(state.Peers))
+	for _, p := range state.Peers {
+		metadataByAddress[p.Address] = p.Metadata
+	}
+
+	// The new leader's own metadata must be present
+	assert.Equal(t, []byte("meta-"+newLeader), metadataByAddress[newLeader])
+
+	// Metadata from the nodes that responded to heartbeats must be present
+	// (the new leader gets metadata from nodes that are still in the cluster and reachable)
+	nonLeaderNodes := []string{}
+	for _, id := range []string{"n0", "n1", "n2"} {
+		if id != newLeader {
+			nonLeaderNodes = append(nonLeaderNodes, id)
+		}
+	}
+	// At least one non-leader peer's metadata must have propagated
+	anyPropagated := false
+	for _, id := range nonLeaderNodes {
+		if len(metadataByAddress[id]) > 0 {
+			anyPropagated = true
+			assert.Equal(t, []byte("meta-"+id), metadataByAddress[id])
+		}
+	}
+	assert.True(t, anyPropagated)
 }

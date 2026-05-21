@@ -28,6 +28,7 @@ type NodeSimConfig struct {
 	HeartBeatTimeout    time.Duration
 	LeaderQuorumTimeout time.Duration
 	MinimumQuorum       int
+	Metadata            []byte
 	OnChange            func(election.NodeState)
 }
 
@@ -124,6 +125,9 @@ func New(conf Config) *Simulation {
 			}
 			if nc.MinimumQuorum != 0 {
 				eConf.MinimumQuorum = nc.MinimumQuorum
+			}
+			if nc.Metadata != nil {
+				eConf.Metadata = nc.Metadata
 			}
 			if nc.OnChange != nil {
 				eConf.OnChange = nc.OnChange
