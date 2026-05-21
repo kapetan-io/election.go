@@ -140,8 +140,8 @@ func main() {
 		UniqueID: electionAddr,
 		Peers:    peers,
 		// Called whenever the library detects a change in leadership
-		OnLeaderChange: func(leader string, term uint64) {
-			slog.Info("leader changed", "leader", leader, "term", term)
+		OnChange: func(state election.NodeState) {
+			slog.Info("leader changed", "leader", state.Leader, "term", state.Term)
 		},
 		// Called when the library wants to contact other peers
 		SendRPC: sendRPC,

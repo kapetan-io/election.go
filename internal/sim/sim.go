@@ -28,7 +28,7 @@ type NodeSimConfig struct {
 	HeartBeatTimeout    time.Duration
 	LeaderQuorumTimeout time.Duration
 	MinimumQuorum       int
-	OnLeaderChange      func(leader string, term uint64)
+	OnChange            func(election.NodeState)
 }
 
 // pendingRPC holds an RPC queued for delivery to a target node.
@@ -125,8 +125,8 @@ func New(conf Config) *Simulation {
 			if nc.MinimumQuorum != 0 {
 				eConf.MinimumQuorum = nc.MinimumQuorum
 			}
-			if nc.OnLeaderChange != nil {
-				eConf.OnLeaderChange = nc.OnLeaderChange
+			if nc.OnChange != nil {
+				eConf.OnChange = nc.OnChange
 			}
 		}
 

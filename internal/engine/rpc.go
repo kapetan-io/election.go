@@ -13,6 +13,12 @@ const (
 	SetPeersRPC      RPC = "set_peers"
 )
 
+// Peer represents a node in the election cluster
+type Peer struct {
+	Address  string `json:"address"`
+	Metadata []byte `json:"metadata,omitempty"`
+}
+
 // rpcPayload is the JSON envelope for RPC requests and responses
 type rpcPayload struct {
 	RPC      RPC             `json:"rpc"`

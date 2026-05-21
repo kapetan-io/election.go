@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,7 +43,7 @@ type node struct {
 	isLeader atomic.Bool
 	term     atomic.Uint64
 	role     atomic.Int32
-	peers    atomic.Value // []string
+	peers    atomic.Value // []Peer
 
 	// Atomic counters for Stats
 	heartbeatsSent   atomic.Uint64
@@ -59,7 +60,7 @@ type node struct {
 	}
 	peersLastContact map[string]time.Time
 	lastContact      time.Time
-	currentPeers     []string
+	currentPeers     []Peer
 	currentLeader    string
 	rng              *rand.Rand
 
@@ -100,11 +101,12 @@ func NewNode(conf Config) (Node, error) {
 		conf.Log = slog.Default().With("node", conf.UniqueID)
 	}
 
+	initialPeers := peersFromStrings(conf.Peers)
 	n := &node{
 		conf:         conf,
 		self:         conf.UniqueID,
 		log:          conf.Log,
-		currentPeers: conf.Peers,
+		currentPeers: initialPeers,
 		rng:          rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 		// Pre-allocate the event channel so it is safe to read in ReceiveRPC,
 		// SetPeers, and Resign even before Start is called.
@@ -112,7 +114,7 @@ func NewNode(conf Config) (Node, error) {
 		completeCh: make(chan prod.Completion, 1000),
 		doneCh:     make(chan struct{}),
 	}
-	n.peers.Store(conf.Peers)
+	n.peers.Store(slices.Clone(initialPeers))
 	n.leader.Store("")
 	return n, nil
 }
@@ -131,7 +133,7 @@ func (n *node) GetLeader() string {
 }
 
 func (n *node) GetState() NodeState {
-	peers, _ := n.peers.Load().([]string)
+	peers, _ := n.peers.Load().([]Peer)
 	return NodeState{
 		Leader:   n.GetLeader(),
 		IsLeader: n.isLeader.Load(),
@@ -284,8 +286,9 @@ func (n *node) ReceiveRPC(ctx context.Context, req RPCRequest) (RPCResponse, err
 func (n *node) SetPeers(ctx context.Context, peers []string) error {
 	if !n.started.Load() {
 		// Node not started — update directly (no coroutine running yet)
-		n.currentPeers = peers
-		n.peers.Store(peers)
+		converted := peersFromStrings(peers)
+		n.currentPeers = converted
+		n.peers.Store(slices.Clone(converted))
 		return nil
 	}
 
@@ -410,7 +413,7 @@ func (n *node) runFollower(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]
 					continue
 				}
 				// If we have no peers, or are the only peer, become candidate immediately
-				if len(n.currentPeers) == 0 || (len(n.currentPeers) == 1 && n.currentPeers[0] == n.self) {
+				if len(n.currentPeers) == 0 || (len(n.currentPeers) == 1 && n.currentPeers[0].Address == n.self) {
 					n.currentRole = roleCandidate
 					// Cancel the heartbeat timer before returning
 					gocoro.YieldAndAwait(c, engine.Req{Kind: engine.Cancel, TimerID: heartbeatTimerID}) //nolint:errcheck
@@ -572,10 +575,10 @@ func (n *node) electSelf(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) 
 	awaitables := make([]voteAwaitable, 0, len(n.currentPeers))
 
 	for _, peer := range n.currentPeers {
-		if peer == n.self {
+		if peer.Address == n.self {
 			continue
 		}
-		peerCopy := peer
+		peerCopy := peer.Address
 		termCopy := term
 		selfCopy := n.self
 
@@ -656,10 +659,10 @@ func (n *node) runLeader(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) 
 				now := nowResp.Time
 				contacted := 0
 				for _, peer := range n.currentPeers {
-					if peer == n.self {
+					if peer.Address == n.self {
 						continue
 					}
-					lc, ok := n.peersLastContact[peer]
+					lc, ok := n.peersLastContact[peer.Address]
 					if !ok {
 						continue
 					}
@@ -731,10 +734,10 @@ func (n *node) runLeader(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) 
 func (n *node) sendHeartBeats(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) {
 	term := n.currentTerm
 	for _, peer := range n.currentPeers {
-		if peer == n.self {
+		if peer.Address == n.self {
 			continue
 		}
-		peerCopy := peer
+		peerCopy := peer.Address
 		selfCopy := n.self
 		gocoro.Spawn(c, func(cc gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) (struct{}, error) {
 			resp, _ := gocoro.YieldAndAwait(cc, engine.Req{
@@ -771,10 +774,10 @@ func (n *node) sendHeartBeats(c gocoro.Coroutine[engine.Req, engine.Resp, struct
 // sendElectionResets spawns fire-and-forget coroutines to notify peers we are stepping down.
 func (n *node) sendElectionResets(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) {
 	for _, peer := range n.currentPeers {
-		if peer == n.self {
+		if peer.Address == n.self {
 			continue
 		}
-		peerCopy := peer
+		peerCopy := peer.Address
 		gocoro.Spawn(c, func(cc gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) (struct{}, error) {
 			gocoro.YieldAndAwait(cc, engine.Req{ //nolint:errcheck
 				Kind: engine.SendRPC,
@@ -948,8 +951,8 @@ func (n *node) handleResign(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}
 
 func (n *node) handleSetPeers(_ gocoro.Coroutine[engine.Req, engine.Resp, struct{}], event engine.Event, req SetPeersReq) {
 	n.log.Debug("RPC: SetPeersReq", "peers", req.Peers)
-	n.currentPeers = req.Peers
-	n.peers.Store(req.Peers)
+	n.currentPeers = peersFromStrings(req.Peers)
+	n.peers.Store(slices.Clone(n.currentPeers))
 	if event.Done != nil {
 		event.Done(nil)
 	}
@@ -964,15 +967,30 @@ func (n *node) setLeader(leader string) {
 		n.log.Debug("leader changed", "leader", leader)
 		n.currentLeader = leader
 		n.leader.Store(leader)
-		if leader == n.self {
-			n.isLeader.Store(true)
-		} else {
-			n.isLeader.Store(false)
-		}
-		if n.conf.OnLeaderChange != nil {
-			n.conf.OnLeaderChange(leader, n.currentTerm)
-		}
+		n.isLeader.Store(leader == n.self)
+		n.fireOnChange()
 	}
+}
+
+func (n *node) fireOnChange() {
+	if n.conf.OnChange == nil {
+		return
+	}
+	n.conf.OnChange(NodeState{
+		Leader:   n.currentLeader,
+		IsLeader: n.currentLeader == n.self,
+		Term:     n.currentTerm,
+		Peers:    slices.Clone(n.currentPeers),
+		Role:     Role(n.currentRole),
+	})
+}
+
+func peersFromStrings(addrs []string) []Peer {
+	peers := make([]Peer, len(addrs))
+	for i, addr := range addrs {
+		peers[i] = Peer{Address: addr}
+	}
+	return peers
 }
 
 func (n *node) quorumSize() int {
@@ -1018,17 +1036,18 @@ func NewNodeForSim(conf Config, rng *rand.Rand) (Node, error) {
 		conf.Log = slog.Default().With("node", conf.UniqueID)
 	}
 
+	initialPeers := peersFromStrings(conf.Peers)
 	n := &node{
 		conf:         conf,
 		self:         conf.UniqueID,
 		log:          conf.Log,
-		currentPeers: conf.Peers,
+		currentPeers: initialPeers,
 		rng:          rng,
 		eventCh:      make(chan engine.Event, 1000),
 		completeCh:   make(chan prod.Completion, 1000),
 		doneCh:       make(chan struct{}),
 	}
-	n.peers.Store(conf.Peers)
+	n.peers.Store(slices.Clone(initialPeers))
 	n.leader.Store("")
 	return n, nil
 }

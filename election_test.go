@@ -358,7 +358,7 @@ func TestPartitionedMinorityCantElect(t *testing.T) {
 	assert.NotEqual(t, "n0", s.Leader())
 }
 
-// TestOnLeaderChangeCallback verifies that the OnLeaderChange callback fires
+// TestOnLeaderChangeCallback verifies that the OnChange callback fires
 // when a new leader is elected and again when the leader changes.
 func TestOnLeaderChangeCallback(t *testing.T) {
 	type leaderChange struct {
@@ -369,11 +369,11 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 	var mu sync.Mutex
 	changes := make(map[string][]leaderChange) // nodeID → list of leader changes reported
 
-	collect := func(nodeID string) func(string, uint64) {
-		return func(leader string, term uint64) {
+	collect := func(nodeID string) func(election.NodeState) {
+		return func(state election.NodeState) {
 			mu.Lock()
 			defer mu.Unlock()
-			changes[nodeID] = append(changes[nodeID], leaderChange{leader: leader, term: term})
+			changes[nodeID] = append(changes[nodeID], leaderChange{leader: state.Leader, term: state.Term})
 		}
 	}
 
@@ -381,9 +381,9 @@ func TestOnLeaderChangeCallback(t *testing.T) {
 		NumNodes: 3,
 		Seed:     42,
 		NodeConfig: map[string]sim.NodeSimConfig{
-			"n0": {OnLeaderChange: collect("n0")},
-			"n1": {OnLeaderChange: collect("n1")},
-			"n2": {OnLeaderChange: collect("n2")},
+			"n0": {OnChange: collect("n0")},
+			"n1": {OnChange: collect("n1")},
+			"n2": {OnChange: collect("n2")},
 		},
 	})
 

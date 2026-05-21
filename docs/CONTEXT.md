@@ -23,7 +23,7 @@ A node that has started an election by requesting votes from its peers. A node t
 _Avoid_: proposer, nominee
 
 **Peer**:
-Any other node in the cluster known to this node. Peers are opaque strings; the library never interprets them.
+Any other node in the cluster known to this node. Historically an opaque string; now a struct with `Address` and `Metadata` fields (see Metadata section).
 _Avoid_: neighbor, endpoint
 
 ### Election Mechanics
@@ -52,6 +52,14 @@ The duration a leader waits for heartbeat responses from a quorum of followers b
 **Leader-Check Guard**:
 A rule in vote handling: a follower with a known current leader rejects vote requests from other candidates. Prevents partitioned nodes with inflated terms from disrupting the cluster on rejoin. This library's alternative to the PreVote protocol.
 
+**OnChange**:
+A callback (`func(NodeState)`) invoked when the node's view of the cluster changes — leadership transitions or peer metadata updates. Replaces the earlier `OnLeaderChange` callback.
+_Avoid_: OnLeaderChange (deprecated name), OnUpdate, OnEvent
+
+**SetMetadata**:
+A method on `Node` that updates this node's metadata blob, serialized through the coroutine event queue. The new value propagates on the next heartbeat cycle. Returns `ErrMetadataTooLarge` if the blob exceeds 1KB.
+_Avoid_: UpdateMetadata, PutMetadata
+
 **ResetElection**:
 An RPC sent by a stepping-down leader to its reachable peers, clearing their leader reference so they become available to vote in the next election.
 
@@ -71,6 +79,16 @@ A testing approach where the same state-machine code runs against simulated IO (
 
 **Virtual Clock**:
 A simulated clock used in DST that advances only when explicitly stepped, replacing wall-clock time.
+
+### Metadata
+
+**Metadata**:
+A per-node opaque byte blob (`[]byte`) that the library carries on heartbeats without interpreting. The consuming service owns serialization and deserialization. Capped at 1KB.
+_Avoid_: payload, state, context, annotations
+
+**Peer**:
+A struct representing a cluster participant, containing an `Address` (the node identifier) and optional `Metadata`. Replaces the earlier bare-string representation in `NodeState.Peers`. `Peer` is a read-only output type — consumers receive it from `NodeState.Peers` and `OnChange`. Input APIs (`Config.Peers`, `SetPeers`) remain `[]string`; metadata input is exclusively through `Config.Metadata` and `SetMetadata`.
+_Avoid_: member, endpoint (for the struct); `SendRPC` still takes a peer address string
 
 ### Transport
 

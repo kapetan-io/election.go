@@ -23,6 +23,7 @@ type ResignReq = engine.ResignReq
 type ResignResp = engine.ResignResp
 type SetPeersReq = engine.SetPeersReq
 type SetPeersResp = engine.SetPeersResp
+type Peer = engine.Peer
 
 const (
 	HeartBeatRPC     = engine.HeartBeatRPC
@@ -59,7 +60,7 @@ type NodeState struct {
 	Leader   string
 	IsLeader bool
 	Term     uint64
-	Peers    []string
+	Peers    []Peer
 	Role     Role
 }
 
@@ -117,10 +118,10 @@ type Config struct {
 	// SendRPC sends an RPC request to a peer
 	SendRPC SendRPCFunc
 
-	// OnLeaderChange is called whenever the leader changes.
+	// OnChange is called whenever the leader changes or peer metadata is updated.
 	// It runs synchronously in the election goroutine; do not call
-	// Resign, SetPeers, Stop, or ReceiveRPC from this callback.
-	OnLeaderChange func(leader string, term uint64)
+	// Resign, SetPeers, Stop, or ReceiveRPC from this callback. Must not block.
+	OnChange func(NodeState)
 
 	// HeartBeatTimeout is how long followers wait before starting a new election
 	HeartBeatTimeout time.Duration
