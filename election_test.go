@@ -360,6 +360,30 @@ func TestPartitionedMinorityCantElect(t *testing.T) {
 	assert.NotEqual(t, "n0", s.Leader())
 }
 
+// TestFullyIsolatedNodeNeverBecomesLeader verifies that a node partitioned from
+// all peers keeps cycling through elections but never achieves quorum.
+func TestFullyIsolatedNodeNeverBecomesLeader(t *testing.T) {
+	s := sim.New(sim.Config{NumNodes: 3, Seed: 42})
+
+	// Partition n0 from all other nodes before any leader is elected
+	s.Partition([]string{"n0"}, []string{"n1", "n2"})
+
+	// Run long enough for many election cycles
+	s.RunFor(120 * time.Second)
+
+	// n0 must never become leader — it can't reach anyone for votes
+	assert.False(t, s.Node("n0").IsLeader())
+	assert.Empty(t, s.Node("n0").GetState().Leader)
+
+	// n0's term should have increased as it cycled through failed elections
+	assert.Greater(t, s.Node("n0").GetState().Term, uint64(1))
+
+	// The majority partition (n1, n2) should have elected a leader
+	assert.Equal(t, 1, s.LeaderCount())
+	leader := s.Leader()
+	assert.NotEqual(t, "n0", leader)
+}
+
 // TestOnLeaderChangeCallback verifies that the OnChange callback fires
 // when a new leader is elected and again when the leader changes.
 func TestOnLeaderChangeCallback(t *testing.T) {
