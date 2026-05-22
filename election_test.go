@@ -667,6 +667,35 @@ func TestSetMetadataSizeValidation(t *testing.T) {
 	})
 }
 
+// TestSetPeersPreStartPreservesMetadata verifies that calling SetMetadata then
+// SetPeers before Start preserves the node's own metadata in the peer list.
+func TestSetPeersPreStartPreservesMetadata(t *testing.T) {
+	n, err := election.NewNode(election.Config{
+		UniqueID: "n0",
+		Peers:    []string{"n0"},
+		SendRPC: func(_ context.Context, _ string, _ election.RPCRequest) (election.RPCResponse, error) {
+			return election.RPCResponse{}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, n.SetMetadata(ctx, []byte("my-metadata")))
+
+	// SetPeers with a new list should preserve the self-entry's metadata
+	require.NoError(t, n.SetPeers(ctx, []string{"n0", "n1", "n2"}))
+
+	state := n.GetState()
+	require.Len(t, state.Peers, 3)
+	for _, p := range state.Peers {
+		if p.Address == "n0" {
+			assert.Equal(t, []byte("my-metadata"), p.Metadata)
+			return
+		}
+	}
+	t.Fatal("self entry not found in peers")
+}
+
 // TestLeaderSeesAllPeerMetadata verifies that after a heartbeat cycle the leader's
 // GetState().Peers contains metadata for every peer in the cluster.
 func TestLeaderSeesAllPeerMetadata(t *testing.T) {
@@ -888,8 +917,13 @@ func TestOnChangeLeaderTransitionIncludesMetadata(t *testing.T) {
 	assert.True(t, newLeaderState.IsLeader)
 	assert.Equal(t, newLeader, newLeaderState.Leader)
 	assert.NotZero(t, newLeaderState.Term)
-	// Peers list must be populated
+	// Peers list must be populated with the new leader's own metadata
 	assert.NotEmpty(t, newLeaderState.Peers)
+	for _, p := range newLeaderState.Peers {
+		if p.Address == newLeader {
+			assert.Equal(t, []byte("meta-"+newLeader), p.Metadata)
+		}
+	}
 }
 
 // TestSetMetadataMidRun verifies that metadata set after the cluster is running
@@ -982,29 +1016,16 @@ func TestMetadataSurvivesLeaderTransition(t *testing.T) {
 	// The new leader's own metadata must be present
 	assert.Equal(t, []byte("meta-"+newLeader), metadataByAddress[newLeader])
 
-	// Metadata from the nodes that responded to heartbeats must be present
-	// (the new leader gets metadata from nodes that are still in the cluster and reachable)
-	nonLeaderNodes := []string{}
+	// All peers' metadata must have propagated after 60s of heartbeats
 	for _, id := range []string{"n0", "n1", "n2"} {
-		if id != newLeader {
-			nonLeaderNodes = append(nonLeaderNodes, id)
-		}
+		assert.Equal(t, []byte("meta-"+id), metadataByAddress[id])
 	}
-	// At least one non-leader peer's metadata must have propagated
-	anyPropagated := false
-	for _, id := range nonLeaderNodes {
-		if len(metadataByAddress[id]) > 0 {
-			anyPropagated = true
-			assert.Equal(t, []byte("meta-"+id), metadataByAddress[id])
-		}
-	}
-	assert.True(t, anyPropagated)
 }
 
 // TestSimRejectsOversizedMetadata verifies that creating a sim node with metadata
 // exceeding 1KB panics, matching the production Start() behavior.
 func TestSimRejectsOversizedMetadata(t *testing.T) {
-	assert.Panics(t, func() {
+	require.Panics(t, func() {
 		sim.New(sim.Config{
 			NumNodes: 3,
 			Seed:     42,

@@ -295,6 +295,7 @@ func (n *node) SetPeers(ctx context.Context, peers []string) error {
 	if !n.started.Load() {
 		// Node not started — update directly (no coroutine running yet)
 		converted := peersFromStrings(peers)
+		applySelfMetadata(n.self, n.currentMetadata, converted)
 		n.currentPeers = converted
 		n.peers.Store(slices.Clone(converted))
 		return nil
