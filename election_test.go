@@ -1000,3 +1000,17 @@ func TestMetadataSurvivesLeaderTransition(t *testing.T) {
 	}
 	assert.True(t, anyPropagated)
 }
+
+// TestSimRejectsOversizedMetadata verifies that creating a sim node with metadata
+// exceeding 1KB panics, matching the production Start() behavior.
+func TestSimRejectsOversizedMetadata(t *testing.T) {
+	assert.Panics(t, func() {
+		sim.New(sim.Config{
+			NumNodes: 3,
+			Seed:     42,
+			NodeConfig: map[string]sim.NodeSimConfig{
+				"n0": {Metadata: bytes.Repeat([]byte("x"), 1025)},
+			},
+		})
+	})
+}

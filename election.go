@@ -478,7 +478,7 @@ func (n *node) runFollower(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]
 			n.handleSetPeers(c, event, SetPeersReq{Peers: event.Peers})
 
 		case engine.EventSetMetadata:
-			n.handleSetMetadata(c, event)
+			n.handleSetMetadata(c, event, SetMetadataReq{Metadata: event.Metadata})
 
 		case engine.EventResign:
 			if event.Done != nil {
@@ -582,7 +582,7 @@ func (n *node) runCandidate(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}
 			n.handleSetPeers(c, event, SetPeersReq{Peers: event.Peers})
 
 		case engine.EventSetMetadata:
-			n.handleSetMetadata(c, event)
+			n.handleSetMetadata(c, event, SetMetadataReq{Metadata: event.Metadata})
 
 		case engine.EventResign:
 			if event.Done != nil {
@@ -755,7 +755,7 @@ func (n *node) runLeader(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}]) 
 			}
 
 		case engine.EventSetMetadata:
-			n.handleSetMetadata(c, event)
+			n.handleSetMetadata(c, event, SetMetadataReq{Metadata: event.Metadata})
 			// Immediately propagate new metadata to followers
 			if n.currentRole == roleLeader {
 				n.sendHeartBeats(c)
@@ -890,7 +890,7 @@ func (n *node) processRPC(c gocoro.Coroutine[engine.Req, engine.Resp, struct{}],
 	case SetPeersReq:
 		n.handleSetPeers(c, event, cmd)
 	case SetMetadataReq:
-		n.handleSetMetadata(c, event)
+		n.handleSetMetadata(c, event, cmd)
 	default:
 		n.log.Error("unexpected RPC command", "request", event.RPCReq.Request)
 		if event.Respond != nil {
@@ -1047,9 +1047,9 @@ func (n *node) handleSetPeers(_ gocoro.Coroutine[engine.Req, engine.Resp, struct
 	}
 }
 
-func (n *node) handleSetMetadata(_ gocoro.Coroutine[engine.Req, engine.Resp, struct{}], event engine.Event) {
+func (n *node) handleSetMetadata(_ gocoro.Coroutine[engine.Req, engine.Resp, struct{}], event engine.Event, req SetMetadataReq) {
 	n.log.Debug("EventSetMetadata")
-	n.currentMetadata = event.Metadata
+	n.currentMetadata = req.Metadata
 	applySelfMetadata(n.self, n.currentMetadata, n.currentPeers)
 	n.peers.Store(slices.Clone(n.currentPeers))
 	if event.Done != nil {
@@ -1174,6 +1174,10 @@ func StartNodeForSim(nd Node, sched gocoro.Scheduler[engine.Req, engine.Resp], i
 	}
 	if !n.started.CompareAndSwap(false, true) {
 		return errors.New("node already started")
+	}
+
+	if len(n.conf.Metadata) > maxMetadataSize {
+		return ErrMetadataTooLarge
 	}
 
 	n.sched = sched
